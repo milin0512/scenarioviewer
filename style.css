@@ -61,6 +61,16 @@ body {
 
 /* ============ ヘッダー・モード切替 ============ */
 
+/* ヘッダーと編集用リボン(.mini-toolbar)をまとめて画面上部に固定する
+   (2026-07-25、Mikoto要望。iPhone/iPad実機でOS標準のコピー&ペースト
+   ポップアップとの重なりを避けるため、選択範囲追従型から常時上部固定に変更)。 */
+.app-chrome {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+}
+
 .app-header {
   display: flex;
   align-items: center;
@@ -68,10 +78,6 @@ body {
   padding: 10px 12px;
   background: var(--header-bg);
   color: var(--header-text);
-  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
-  position: sticky;
-  top: 0;
-  z-index: 20;
 }
 
 .app-header__title {
@@ -252,7 +258,9 @@ body.mode-preview .app-header__menu-btn {
   touch-action: manipulation;
 }
 
-.btn--primary { background: var(--accent); color: #fff; }
+/* ヘッダーと同じブランドカラーに揃える(2026-07-25、Mikoto要望)。--header-bgは
+   ダーク/ライト共通の固定色のため、このボタンもテーマに関わらず同じ色になる。 */
+.btn--primary { background: var(--header-bg); color: #fff; }
 .btn--secondary { background: var(--btn-secondary-bg); color: #fff; }
 .btn--danger { background: var(--danger); color: #fff; }
 .btn--block { display: block; width: 100%; }
@@ -347,20 +355,23 @@ body.mode-preview .app-header__menu-btn {
 
 .toast.is-error { background: var(--danger); }
 
-/* ============ ミニツールバー ============ */
+/* ============ 編集用リボン(旧ミニツールバー) ============ */
 
+/* 選択範囲に追従させず、画面上部(ヘッダー直下)に常時ドッキングさせる
+   (2026-07-25、Mikoto要望・iPhone/iPad実機報告)。ボタン数が多く狭い画面には
+   収まりきらないため、折り返さず横スクロールにする(Wordのリボンのイメージ)。 */
 .mini-toolbar {
-  position: fixed;
-  z-index: 40;
   display: flex;
+  align-items: center;
   gap: 4px;
   background: #263238;
-  border-radius: 8px;
-  padding: 6px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  padding: 6px 8px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .mini-toolbar button {
+  flex: 0 0 auto;
   border: none;
   background: #37474f;
   color: #fff;
@@ -368,9 +379,22 @@ body.mode-preview .app-header__menu-btn {
   min-width: 40px;
   min-height: 40px;
   font-size: 0.95rem;
+  white-space: nowrap;
 }
 
 .mini-toolbar button:active { background: var(--accent); }
+
+.mini-toolbar button:disabled {
+  opacity: 0.4;
+}
+
+.mini-toolbar__sep {
+  flex: 0 0 auto;
+  width: 1px;
+  align-self: stretch;
+  margin: 4px 2px;
+  background: rgba(255,255,255,0.2);
+}
 
 /* ============ アウトラインビュー ============ */
 

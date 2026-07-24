@@ -8,6 +8,7 @@
 </head>
 <body class="mode-edit">
 
+<div class="app-chrome" id="app-chrome">
 <header class="app-header">
   <h1 class="app-header__title">シナリオ整形ツール</h1>
 
@@ -18,6 +19,23 @@
 
   <button type="button" class="app-header__menu-btn" id="btn-sidebar-open" hidden aria-label="メニューを開く">☰</button>
 </header>
+
+<!-- 編集用リボン(Word風、常時上部に固定表示。5.3。iPhone/iPad実機検証で、選択範囲に
+     追従するミニツールバーがOS標準のコピー&ペーストのポップアップと重なってタップ
+     できなくなる不具合が判明したため、2026-07-25にこの形式に変更した) -->
+<div class="mini-toolbar" id="mini-toolbar" hidden>
+  <button type="button" id="btn-undo" title="元に戻す" disabled>↩️元に戻す</button>
+  <span class="mini-toolbar__sep"></span>
+  <button type="button" data-action="heading" title="見出しにする" disabled>見出し</button>
+  <button type="button" data-action="copybtn" title="コピペボタン設置" disabled>📋+</button>
+  <button type="button" data-action="npc" title="選択範囲からNPCカードを作成" disabled>👤</button>
+  <button type="button" data-action="link" title="内部リンクを設定" disabled>🔗</button>
+  <span class="mini-toolbar__sep"></span>
+  <button type="button" data-action="bold" title="太字" disabled><b>B</b></button>
+  <button type="button" data-action="italic" title="イタリック" disabled><i>I</i></button>
+  <button type="button" data-action="underline" title="下線" disabled><u>U</u></button>
+</div>
+</div>
 
 <div class="sidebar-backdrop" id="sidebar-backdrop" hidden></div>
 <aside class="sidebar" id="sidebar" hidden>
@@ -55,7 +73,7 @@
 
   <!-- 編集エリア -->
   <section class="panel" id="section-editor" hidden>
-    <p class="panel__desc">本文をドラッグして選択すると、見出し化・文字装飾・コピペボタン設置ができる小さなツールバーが出ます。</p>
+    <p class="panel__desc">本文をドラッグして選択すると、上部のリボンのボタンで見出し化・文字装飾・コピペボタン設置ができます。</p>
     <div class="editor-body" id="editor-body" contenteditable="true" spellcheck="false"></div>
   </section>
 
@@ -73,17 +91,6 @@
   </section>
 
 </main>
-
-<!-- 選択時に出るミニツールバー -->
-<div class="mini-toolbar" id="mini-toolbar" hidden>
-  <button type="button" data-action="heading" title="見出しにする">見出し</button>
-  <button type="button" data-action="bold" title="太字"><b>B</b></button>
-  <button type="button" data-action="italic" title="イタリック"><i>I</i></button>
-  <button type="button" data-action="underline" title="下線"><u>U</u></button>
-  <button type="button" data-action="copybtn" title="コピペボタン設置">📋+</button>
-  <button type="button" data-action="npc" title="選択範囲からNPCカードを作成">👤NPC化</button>
-  <button type="button" data-action="link" title="内部リンクを設定">🔗リンク</button>
-</div>
 
 <!-- 内部リンクのリンク先選択ピッカー -->
 <div class="link-picker-backdrop" id="link-picker-backdrop" hidden></div>

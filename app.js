@@ -51,6 +51,7 @@ const el = {
   npcCardsInline: document.getElementById("npc-cards-inline"),
 
   miniToolbar: document.getElementById("mini-toolbar"),
+  btnUndo: document.getElementById("btn-undo"),
   exportBar: document.getElementById("export-bar"),
   exportFormatSelect: document.getElementById("export-format-select"),
   btnExportDownload: document.getElementById("btn-export-download"),
@@ -362,6 +363,10 @@ function finishLoad(fileName, kindLabel) {
   el.exportBar.hidden = false;
   el.sidebarOpenBtn.hidden = false;
   syncAllHeadingIndents();
+  // 新しいファイルを読み込んだら、それ以前の編集内容に戻れても意味がないため
+  // 元に戻す履歴もリセットする(2026-07-25)。
+  undoStack = [];
+  updateUndoButton();
   setMode("edit");
 }
 
@@ -385,7 +390,7 @@ function setMode(mode) {
   el.btnModePreview.classList.toggle("is-active", mode === "preview");
   el.sectionEditor.hidden = mode !== "edit";
   el.sectionPreview.hidden = mode !== "preview";
-  hideMiniToolbar();
+  updateRibbonVisibility();
   closeSidebar();
 
   if (mode === "preview") {
@@ -463,6 +468,7 @@ function renderEditToolsView(container) {
       showToast("削除できる空行はありませんでした。");
       return;
     }
+    pushUndoSnapshot();
     emptyParagraphs.forEach((p) => p.remove());
     scheduleAutoRender();
     showToast(`空行を${emptyParagraphs.length}件削除しました。`);
@@ -512,8 +518,11 @@ function renderEditToolsView(container) {
       showToast("検索する文字列を入力してください。", true);
       return;
     }
+    pushUndoSnapshot();
     const count = findAndReplaceInEditor(searchTerm, replaceTerm);
     if (count === 0) {
+      undoStack.pop();
+      updateUndoButton();
       showToast("一致する文字列が見つかりませんでした。");
       return;
     }
@@ -549,20 +558,22 @@ function findAndReplaceInEditor(searchTerm, replaceTerm) {
 }
 
 /* ============================================================
- * 本文選択 → ミニツールバー(5.3)
- * iOS Safari実機検証で確認済みの方式(mousedown+preventDefaultで確定、
- * selectionchangeで常時バックアップ)を踏襲する。
+ * 本文選択 → 編集用リボン(5.3)
+ * 以前は選択範囲に追従する浮動ミニツールバーだったが、iPhone/iPad実機で
+ * OS標準のコピー&ペーストポップアップと重なってタップできなくなる不具合が
+ * 判明したため(2026-07-25、Mikoto報告)、画面上部に常時ドッキングする
+ * リボン形式に変更した。選択範囲の捕捉方式(mousedown+preventDefault、
+ * selectionchangeでの常時バックアップ)自体はiOS Safari実機検証で確認済みの
+ * ものをそのまま踏襲し、位置計算だけをやめて、ボタンの有効/無効切り替えに用途を変える。
  * ========================================================== */
 
 let savedRange = null;
 
+const ribbonActionBtns = Array.from(el.miniToolbar.querySelectorAll("button[data-action]"));
+
 document.addEventListener("selectionchange", () => {
   captureCurrentSelectionIfAny();
-  if (savedRange) {
-    showMiniToolbarNear(savedRange);
-  } else {
-    hideMiniToolbar();
-  }
+  updateRibbonActionButtons();
 });
 
 function captureCurrentSelectionIfAny() {
@@ -571,10 +582,7 @@ function captureCurrentSelectionIfAny() {
   if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
     const range = sel.getRangeAt(0);
     // 開始点(anchorNode)だけでなく終了点もeditorBody内にあることを確認する。
-    // ドラッグが本文の外(書き出しバーなど画面に固定表示されている要素)まで
-    // はみ出すと、範囲の外接矩形が画面全体に近い大きさになり、ミニツールバーが
-    // 選択位置と無関係な画面中央下寄りに表示されてしまうバグがあったため
-    // (2026-07-24、Mikoto報告)、はみ出した選択はミニツールバーを出さないようにする。
+    // 本文の外(書き出しバーなど)まではみ出した選択は対象外にする。
     if (el.editorBody.contains(range.startContainer) && el.editorBody.contains(range.endContainer)) {
       savedRange = range.cloneRange();
       return;
@@ -583,28 +591,17 @@ function captureCurrentSelectionIfAny() {
   savedRange = null;
 }
 
-function showMiniToolbarNear(range) {
-  // 複数行・複数段落にまたがる選択では、getBoundingClientRect()が段落と段落の間の
-  // 余白を含んだ画面いっぱいに近い幅の矩形を返すことがある(段落全体が選択されている
-  // 行間に、ブラウザが幅いっぱいのギャップ矩形を挟むため)。これをそのまま使うと、
-  // ツールバーが選択位置と無関係な画面中央付近に表示されてしまう(2026-07-24、Mikoto報告)。
-  // 実際の最上行のテキスト矩形(getClientRectsの先頭要素)を使い、選択範囲の上に
-  // 表示されるようにする(2026-07-24、Mikoto要望: 最下行の上ではなく最上行の上に出したい)。
-  const rects = range.getClientRects();
-  const rect = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
-  if (rect.width === 0 && rect.height === 0) { hideMiniToolbar(); return; }
-  el.miniToolbar.hidden = false;
-  const barRect = el.miniToolbar.getBoundingClientRect();
-  let top = rect.top - barRect.height - 8;
-  if (top < 8) top = rect.bottom + 8;
-  let left = rect.left + rect.width / 2 - barRect.width / 2;
-  left = Math.max(8, Math.min(left, window.innerWidth - barRect.width - 8));
-  el.miniToolbar.style.top = top + "px";
-  el.miniToolbar.style.left = left + "px";
+// リボンは編集モード中は常時表示し、選択範囲の有無でボタンの有効/無効だけを切り替える。
+function updateRibbonActionButtons() {
+  const enabled = state.mode === "edit" && !!savedRange;
+  ribbonActionBtns.forEach((btn) => { btn.disabled = !enabled; });
 }
 
-function hideMiniToolbar() {
-  el.miniToolbar.hidden = true;
+function updateRibbonVisibility() {
+  el.miniToolbar.hidden = state.mode !== "edit";
+  savedRange = null;
+  updateRibbonActionButtons();
+  updateUndoButton();
 }
 
 el.miniToolbar.querySelectorAll("button[data-action]").forEach((btn) => {
@@ -616,6 +613,48 @@ el.miniToolbar.querySelectorAll("button[data-action]").forEach((btn) => {
     applyMarkToSelection(btn.dataset.action);
   });
 });
+
+/* ============================================================
+ * 元に戻す(Undo、2026-07-25、Mikoto要望)
+ * 本文(editorBody)のHTMLとNPC一覧(state.npcs)をまとめてスナップショットし、
+ * 直前の状態に戻す。ネイティブのUndo(Ctrl+Z等)はDOM操作(見出し化・NPC追加等)を
+ * 追跡できないため、操作の起点ごとに明示的にスナップショットを取る方式にした。
+ * ========================================================== */
+
+const UNDO_STACK_LIMIT = 20;
+let undoStack = [];
+
+function pushUndoSnapshot() {
+  undoStack.push({
+    html: el.editorBody.innerHTML,
+    npcs: JSON.parse(JSON.stringify(state.npcs)),
+  });
+  if (undoStack.length > UNDO_STACK_LIMIT) undoStack.shift();
+  updateUndoButton();
+}
+
+function updateUndoButton() {
+  el.btnUndo.disabled = undoStack.length === 0;
+}
+
+function performUndo() {
+  const snapshot = undoStack.pop();
+  if (!snapshot) {
+    showToast("これ以上元に戻せません。");
+    return;
+  }
+  el.editorBody.innerHTML = snapshot.html;
+  state.npcs = snapshot.npcs;
+  window.getSelection().removeAllRanges();
+  savedRange = null;
+  updateRibbonActionButtons();
+  updateUndoButton();
+  syncAllHeadingIndents();
+  scheduleAutoRender();
+  showToast("元に戻しました。");
+}
+
+el.btnUndo.addEventListener("click", performUndo);
 
 /* ============================================================
  * 見出し・文字装飾・コピペボタン設置の適用(5.4・5.6・5.12)
@@ -656,11 +695,12 @@ function applyMarkToSelection(type) {
   if (!savedRange) return;
   const range = savedRange;
   savedRange = null;
-  if (!el.editorBody.contains(range.commonAncestorContainer)) { hideMiniToolbar(); return; }
+  if (!el.editorBody.contains(range.commonAncestorContainer)) { updateRibbonActionButtons(); return; }
 
   try {
     if (type === "heading") {
       const existing = findAncestorMark(range.commonAncestorContainer, (n) => n.classList && n.classList.contains("h-mark"));
+      pushUndoSnapshot();
       if (existing) {
         unwrapMarkElement(existing);
         syncAllHeadingIndents();
@@ -668,19 +708,25 @@ function applyMarkToSelection(type) {
         applyHeadingMark(range);
       }
     } else if (type === "copybtn") {
-      const existing = findAncestorMark(range.commonAncestorContainer, (n) => n.classList && n.classList.contains("cp-wrap"));
+      // 複数段落にまたがる範囲の場合、段落ごとに個別の.cp-wrapが作られるため
+      // (applyCopyButtonMark参照)、判定はcommonAncestorContainerではなく
+      // 範囲の開始位置(startContainer)から見る(2026-07-25、Mikoto報告・修正)。
+      const existing = findAncestorMark(range.startContainer, (n) => n.classList && n.classList.contains("cp-wrap"));
+      pushUndoSnapshot();
       if (existing) {
         removeCopyButtonMark(existing);
       } else {
         applyCopyButtonMark(range);
       }
     } else if (type === "npc") {
+      pushUndoSnapshot();
       createNpcFromRange(range);
     } else if (type === "link") {
       openLinkPicker(range);
     } else {
       const tagName = DECORATION_TAGS[type];
       const existing = findAncestorMark(range.commonAncestorContainer, (n) => n.tagName === tagName);
+      pushUndoSnapshot();
       if (existing) {
         unwrapMarkElement(existing);
       } else {
@@ -693,7 +739,7 @@ function applyMarkToSelection(type) {
   }
 
   window.getSelection().removeAllRanges();
-  hideMiniToolbar();
+  updateRibbonActionButtons();
   scheduleAutoRender();
 }
 
@@ -790,34 +836,82 @@ function applyDecorationMark(range, type) {
 
 let cpCounter = 0;
 
-// コピー範囲は引用ブロックのようにまとめて表示する(2026-07-23、Mikoto要望)。
-// <span>のままdisplay:blockにすることで、<p>の中に入れてもHTMLとして不正にならない
-// ようにしている(<div>を<p>の中に入れると構造が壊れるため)。
-function applyCopyButtonMark(range) {
-  cpCounter++;
-  const cpId = "cp_" + cpCounter + "_" + Date.now().toString(36);
-
-  const wrapper = document.createElement("span");
-  wrapper.className = "cp-wrap";
-  wrapper.dataset.cpid = cpId;
-
-  const target = document.createElement("span");
-  target.className = "cp-target";
-  target.dataset.cpid = cpId;
-  target.appendChild(range.extractContents());
-  wrapper.appendChild(target);
-
+function buildCpButton(cpId) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "cp-btn";
   btn.dataset.cpid = cpId;
   btn.textContent = "📋コピー";
-  wrapper.appendChild(btn);
-
-  range.insertNode(wrapper);
+  return btn;
 }
 
-// コピペボタンのクリックはエディタ・プレビューどちらでも動作させる(委譲リスナー)
+function wrapAsCpTarget(fragment, cpId) {
+  const wrapper = document.createElement("span");
+  wrapper.className = "cp-wrap";
+  wrapper.dataset.cpid = cpId;
+  const target = document.createElement("span");
+  target.className = "cp-target";
+  target.dataset.cpid = cpId;
+  target.appendChild(fragment);
+  wrapper.appendChild(target);
+  return wrapper;
+}
+
+// コピー範囲は引用ブロックのようにまとめて表示する(2026-07-23、Mikoto要望)。
+// <span>のままdisplay:blockにすることで、<p>の中に入れてもHTMLとして不正にならない
+// ようにしている(<div>を<p>の中に入れると構造が壊れるため)。
+//
+// 複数段落にまたがる選択の場合、1つの<span>で複数の<p>をまたいで包むと
+// (extractContentsが返す複数の<p>を1つのspanに入れることになり)HTML構造が
+// 壊れ、後から同じ範囲を選び直しても解除(トグルオフ)できなくなる不具合があった
+// (2026-07-25、Mikoto報告)。そのため、段落ごとに個別の.cp-wrapで包み、
+// 同じcpidを共有させることで「1つのコピー範囲」として扱う。コピーボタンは
+// 最後の段落のwrapperにだけ設置する。
+function applyCopyButtonMark(range) {
+  cpCounter++;
+  const cpId = "cp_" + cpCounter + "_" + Date.now().toString(36);
+  const paragraphs = getParagraphsInRange(range);
+
+  if (paragraphs.length <= 1) {
+    const wrapper = wrapAsCpTarget(range.extractContents(), cpId);
+    wrapper.appendChild(buildCpButton(cpId));
+    range.insertNode(wrapper);
+    return;
+  }
+
+  const firstP = paragraphs[0];
+  const lastP = paragraphs[paragraphs.length - 1];
+
+  paragraphs.forEach((p) => {
+    const subRange = document.createRange();
+    subRange.setStart(p === firstP ? range.startContainer : p, p === firstP ? range.startOffset : 0);
+    subRange.setEnd(p === lastP ? range.endContainer : p, p === lastP ? range.endOffset : p.childNodes.length);
+
+    const wrapper = wrapAsCpTarget(subRange.extractContents(), cpId);
+    if (p === lastP) wrapper.appendChild(buildCpButton(cpId));
+    subRange.insertNode(wrapper);
+  });
+}
+
+// 複数段落にまたがるコピー範囲は、同じcpidを持つ.cp-wrapが複数存在しうるため、
+// 見つかった1つだけでなく同じcpidのものをすべて解除する(2026-07-25、Mikoto報告・修正)。
+function removeCopyButtonMark(wrapperEl) {
+  const cpId = wrapperEl.dataset.cpid;
+  const wrappers = cpId
+    ? Array.from(document.querySelectorAll(`.cp-wrap[data-cpid="${cpId}"]`))
+    : [wrapperEl];
+  wrappers.forEach((w) => {
+    const target = w.querySelector(".cp-target");
+    const parent = w.parentNode;
+    if (target) {
+      while (target.firstChild) parent.insertBefore(target.firstChild, w);
+    }
+    w.remove();
+  });
+}
+
+// コピペボタンのクリックはエディタ・プレビューどちらでも動作させる(委譲リスナー)。
+// 複数段落にまたがる範囲は、同じcpidを持つ.cp-targetが複数あるため、すべて連結する。
 document.addEventListener("click", (e) => {
   const btn = e.target.closest(".cp-btn");
   if (!btn) return;
@@ -825,8 +919,8 @@ document.addEventListener("click", (e) => {
   if (btn.dataset.copyText !== undefined) {
     text = btn.dataset.copyText;
   } else {
-    const span = document.querySelector(`.cp-target[data-cpid="${btn.dataset.cpid}"]`);
-    text = span ? span.textContent : "";
+    const spans = document.querySelectorAll(`.cp-target[data-cpid="${btn.dataset.cpid}"]`);
+    text = Array.from(spans).map((s) => s.textContent).join("\n");
   }
   copyTextToClipboard(text);
 });
@@ -920,6 +1014,7 @@ function renderLinkPickerBody() {
 
 function applyLinkMark(range, linkType, targetId) {
   if (!range) return;
+  pushUndoSnapshot();
   const a = document.createElement("a");
   a.className = "int-link";
   a.href = "#" + targetId;
@@ -1103,6 +1198,7 @@ function renderOutlineView(container) {
     textInput.className = "outline-item__text";
     textInput.value = markEl.textContent;
     textInput.addEventListener("change", () => {
+      pushUndoSnapshot();
       markEl.textContent = textInput.value;
       scheduleAutoRender();
     });
@@ -1129,22 +1225,26 @@ function renderOutlineView(container) {
       actions.className = "outline-item__actions";
 
       actions.appendChild(makeOutlineActionBtn("▲", "上へ移動", index > 0, () => {
+        pushUndoSnapshot();
         moveHeadingUp(markEl);
         renderOutlineView(container);
         scheduleAutoRender();
       }));
       actions.appendChild(makeOutlineActionBtn("▼", "下へ移動", index < marks.length - 1, () => {
+        pushUndoSnapshot();
         moveHeadingDown(markEl);
         renderOutlineView(container);
         scheduleAutoRender();
       }));
       actions.appendChild(makeOutlineActionBtn("◀", "上位階層にする", true, () => {
+        pushUndoSnapshot();
         markEl.dataset.level = String(clampLevel(parseInt(markEl.dataset.level || "1", 10) - 1));
         updateHeadingIndent(markEl);
         renderOutlineView(container);
         scheduleAutoRender();
       }));
       actions.appendChild(makeOutlineActionBtn("▶", "下位階層にする", true, () => {
+        pushUndoSnapshot();
         markEl.dataset.level = String(clampLevel(parseInt(markEl.dataset.level || "1", 10) + 1));
         updateHeadingIndent(markEl);
         renderOutlineView(container);
@@ -1269,11 +1369,14 @@ const DICE_TOKEN_REGEX = /[0-9０-９]+[dD][0-9０-９]+(?:[+\-][0-9０-９]+(?:
 // 技能・チャットパレット行を抽出する。
 // - 「CCB<=50 【こぶし（パンチ）】」のように判定コマンドで始まる行は、そのままコマンド+ラベルとして採用する
 //   (ラベル側にダメージ表記まで続いていても、誤って分割せずそのままラベルに残す)。
-// - 「回避：26％」「＜回避＞32」のように判定コマンドが書かれていない行は、NPCごとに手動設定した
-//   commandPrefix(CCB=6版/CC=7版、Mikoto確認済み: バージョン判定は自動化せず手動設定に委ねる方針)
-//   を使ってコマンドを組み立てる。数値の後にダイス表記が続く場合は、それを「ダメージ判定」ラベルの
-//   別行として追加する(実例のチャットパレット記法で「1d3+1D4 【ダメージ判定】」という表記が
+// - 「回避：26％」「回避　32％」「＜回避＞32」のように判定コマンドが書かれていない行は、NPCごとに
+//   手動設定したcommandPrefix(CCB=6版/CC=7版、Mikoto確認済み: バージョン判定は自動化せず手動設定に
+//   委ねる方針)を使ってコマンドを組み立てる。数値の後にダイス表記が続く場合は、それを「ダメージ判定」
+//   ラベルの別行として追加する(実例のチャットパレット記法で「1d3+1D4 【ダメージ判定】」という表記が
 //   繰り返し使われていたのに合わせた)。
+// - 「名詞＋パーセンテージ」表記(区切りは「：」「:」半角/全角スペース・区切りなしのいずれでもよい)を
+//   本ツールが確実に認識する基準形とし、この形式に当てはまるようユーザー側で本文を調整する運用とする
+//   (2026-07-25、Mikoto確認済み。他の表記ゆれをすべて自動対応することは目指さない)。
 // - 本文中に「【チャットパレット】」「技能」の見出し行がある場合、そこより前の地の文の技能表記
 //   (％表記・＜＞表記など)は同じ技能をすでに完成形で書いた重複であることが多いため無視し、
 //   見出し以降の行だけを対象にする(実例で、地の文の「回避：26％」等とチャットパレット欄の
@@ -1285,7 +1388,9 @@ function extractSkillLines(lines, commandPrefix) {
   });
   const targetLines = markerIndex >= 0 ? lines.slice(markerIndex + 1) : lines;
 
-  const percentLineRegex = /^(.+?)[：:]\s*([0-9０-９]+)％(?:\s+(\S.*))?$/;
+  // 名詞+パーセンテージの基準形。区切りは全角/半角コロン・スペースのいずれでも(組み合わせ・
+  // 繰り返しでも)よく、区切りなし(「回避32％」)も許容する(2026-07-25、Mikoto要望)。
+  const percentLineRegex = /^(.+?)[：:\s]*([0-9０-９]+)％(?:\s+(\S.*))?$/;
   const angleLineRegex = /^[＜<](.+?)[＞>]\s*([0-9０-９]+)(?:\s+(.*))?$/;
   const skills = [];
 
@@ -1393,7 +1498,8 @@ function renderNpcManageView(container) {
       renderNpcManageView(container);
     }));
     const delBtn = makeOutlineBtn("削除", true, () => {
-      if (!confirm(`NPC「${npc.name || "(名前未設定)"}」を削除します。よろしいですか？(元に戻せません)`)) return;
+      if (!confirm(`NPC「${npc.name || "(名前未設定)"}」を削除します。よろしいですか？`)) return;
+      pushUndoSnapshot();
       state.npcs = state.npcs.filter((n) => n.id !== npc.id);
       if (npcOpenId === npc.id) npcOpenId = null;
       renderNpcManageView(container);
@@ -1418,6 +1524,7 @@ function renderNpcManageView(container) {
   addBtn.style.marginTop = "10px";
   addBtn.textContent = "＋ NPCを追加";
   addBtn.addEventListener("click", () => {
+    pushUndoSnapshot();
     const npc = createEmptyNpc();
     state.npcs.push(npc);
     npcOpenId = npc.id;
