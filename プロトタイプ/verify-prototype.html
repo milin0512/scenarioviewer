@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>技術検証プロトタイプ - シナリオ整形ツール</title>
+<style>
+  :root {
+    --accent: #3a6b8a;
+    --ok: #2e7d32;
+    --ng: #c62828;
+    --bg-editable: #fffdf5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif;
+    margin: 0;
+    padding: 16px;
+    background: #f4f4f2;
+    color: #222;
+    line-height: 1.7;
+    -webkit-text-size-adjust: 100%;
+  }
+  h1 { font-size: 1.3rem; margin-bottom: 4px; }
+  h2 { font-size: 1.05rem; border-left: 4px solid var(--accent); padding-left: 8px; margin-top: 0; }
+  .intro {
+    background: #fff;
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+    font-size: 0.9rem;
+  }
+  section {
+    background: #fff;
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }
+  .editable-area {
+    background: var(--bg-editable);
+    border: 1px dashed #c9b98a;
+    border-radius: 6px;
+    padding: 12px;
+    min-height: 120px;
+    font-size: 1rem;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .editable-area p { margin: 0 0 0.8em; }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 10px 0;
+  }
+  button {
+    -webkit-appearance: none;
+    appearance: none;
+    border: none;
+    background: var(--accent);
+    color: #fff;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    min-height: 44px;
+    touch-action: manipulation;
+  }
+  button:active { opacity: 0.75; }
+  button.secondary { background: #7a7a72; }
+  .log {
+    margin-top: 10px;
+    font-size: 0.85rem;
+    background: #f0f0ee;
+    border-radius: 6px;
+    padding: 8px 10px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 180px;
+    overflow-y: auto;
+  }
+  .log .ok { color: var(--ok); font-weight: bold; }
+  .log .ng { color: var(--ng); font-weight: bold; }
+  .heading-mark {
+    display: inline-block;
+    font-weight: bold;
+    font-size: 1.1em;
+    background: #ffe9a8;
+    padding: 0 4px;
+    border-radius: 3px;
+  }
+  .cp-target { background: #e3f1ff; border-radius: 3px; padding: 0 2px; }
+  .cp-btn {
+    display: inline-block;
+    margin-left: 4px;
+    padding: 2px 8px;
+    font-size: 0.8rem;
+    min-height: auto;
+    vertical-align: middle;
+  }
+  .report-box {
+    margin-top: 18px;
+    padding: 12px 14px;
+    background: #fff8e1;
+    border-radius: 8px;
+    font-size: 0.9rem;
+  }
+  .report-box textarea {
+    width: 100%;
+    min-height: 90px;
+    font-size: 1rem;
+    padding: 8px;
+    border-radius: 6px;
+    border: 1px solid #ccc;
+  }
+  .diag {
+    background: #263238;
+    color: #eceff1;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    font-size: 0.8rem;
+    font-family: monospace;
+    white-space: pre-wrap;
+  }
+  .diag .yes { color: #81c784; font-weight: bold; }
+  .diag .no { color: #ef9a9a; font-weight: bold; }
+  .howto {
+    background: #eef6ff;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 0.85rem;
+    margin-bottom: 8px;
+  }
+</style>
+</head>
+<body>
+
+<h1>技術検証プロトタイプ</h1>
+<div class="intro">
+  シナリオ整形ツール本体を作る前に、iPhone/iPad(Safari)で以下の4つの動きが実際に問題なく動くかを確認するためのテストページです。<br>
+  各セクションのボタンを押して、画面に出るログの内容(特に赤字の部分)をあとで教えてください。
+</div>
+
+<div id="diagBox" class="diag">(診断情報を読み込み中...)</div>
+
+<section>
+  <h2>検証1: 本文の範囲選択 → 見出し・装飾・コピペボタンの設置</h2>
+  <div class="howto">
+    <strong>iPhone/iPadでの選択方法:</strong> 文字の上を指でなぞるだけだとページがスクロールしてしまうことがあります。まず<strong>選択したい場所を1回長押し</strong>して単語を選択し、そのあと出てくる<strong>丸いつまみ(ハンドル)をドラッグ</strong>して範囲を広げてください。
+  </div>
+  <p>範囲を選択したら、ボタンを押してください(見出し化・太字・イタリック・下線・コピペボタン設置)。</p>
+  <div id="editable" class="editable-area" contenteditable="true">
+    <p>01.導入</p>
+    <p>探索者たちは古い洋館の前に立っていた。夜半、雨が降り始めている。屋敷の窓にはうっすらと灯りが見える。</p>
+    <p>目星の判定に成功すると、玄関脇の郵便受けに差出人不明の手紙が入っていることに気づく。</p>
+    <p>探索者たちは～～目の前のそれは、人知を超えた神話的な存在である。あなたたちは恐怖を覚え、正気度喪失1/1d3。</p>
+    <p>02.探索</p>
+    <p>屋敷の中は埃っぽく、家具にはすべて白い布がかけられている。図書室の本棚には日記帳が一冊だけ新しい。</p>
+  </div>
+  <div class="toolbar">
+    <button onmousedown="captureSelection(event)" onclick="markSelection('heading')">見出しにする</button>
+    <button onmousedown="captureSelection(event)" onclick="markSelection('bold')">太字</button>
+    <button onmousedown="captureSelection(event)" onclick="markSelection('italic')">イタリック</button>
+    <button onmousedown="captureSelection(event)" onclick="markSelection('underline')">下線</button>
+    <button class="secondary" onmousedown="captureSelection(event)" onclick="markSelection('copybtn')">コピペボタン設置</button>
+  </div>
+  <div id="log1" class="log">(まだ何も試していません)</div>
+</section>
+
+<section>
+  <h2>検証2: クリップボードコピー</h2>
+  <p>ボタンを押すと、決まった文章をコピーしようとします。その後、下の入力欄をタップして「ペースト」してみて、実際にコピーされているか確認してください。</p>
+  <div class="toolbar">
+    <button onclick="testClipboard()">サンプル文章をコピー</button>
+  </div>
+  <input type="text" id="pasteCheck" placeholder="ここに長押し→ペーストして確認" style="width:100%; padding:10px; font-size:1rem; border-radius:6px; border:1px solid #ccc;">
+  <div id="log2" class="log">(まだ何も試していません)</div>
+</section>
+
+<section>
+  <h2>検証3: ファイルの書き出し(ダウンロード・共有)</h2>
+  <p>2種類の保存方法を試します。それぞれ押した後、実際に画面がどうなったか(別タブで開いた/保存画面が出た/共有シートが出た/何も起きなかった、など)を教えてください。</p>
+  <div class="toolbar">
+    <button onclick="testDownload()">方法A: ダウンロードボタン(&lt;a download&gt;)</button>
+    <button onclick="testShare()">方法B: 共有機能(Web Share API)</button>
+  </div>
+  <div id="log3" class="log">(まだ何も試していません)</div>
+</section>
+
+<div class="report-box">
+  <strong>結果メモ(コピーして報告用に使ってください)</strong>
+  <p style="margin:6px 0;">気になったこと・エラーが出たことがあれば、下の欄に自由にメモできます(このメモ自体は保存されません)。</p>
+  <textarea id="reportArea" placeholder="例: 検証3の方法Aは別タブでHTMLがそのまま表示された。方法Bは共有シートが出て『ファイルに保存』を選べた。"></textarea>
+</div>
+
+<script>
+function log(id, message, kind) {
+  var el = document.getElementById(id);
+  var time = new Date().toLocaleTimeString('ja-JP');
+  var cls = kind === 'ok' ? 'ok' : (kind === 'ng' ? 'ng' : '');
+  var line = document.createElement('div');
+  line.innerHTML = '[' + time + '] ' + (cls ? '<span class="' + cls + '">' : '') + message + (cls ? '</span>' : '');
+  if (el.textContent.indexOf('まだ何も') === 0) { el.textContent = ''; }
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+window.onerror = function (msg, src, line, col, err) {
+  log('log1', 'JSエラー発生: ' + msg + ' (行:' + line + ')', 'ng');
+  return false;
+};
+
+// ---- 診断情報(プロトコル・セキュアコンテキストの確認) ----
+(function showDiagnostics() {
+  var box = document.getElementById('diagBox');
+  var lines = [];
+  lines.push('ページのURL: ' + location.href);
+  lines.push('プロトコル: ' + location.protocol + (location.protocol === 'file:' ? '  ← file:// はクリップボードや共有機能が使えない可能性が高い形式です' : ''));
+  lines.push('isSecureContext(安全なコンテキストか): ' + (window.isSecureContext ? '<span class="yes">true</span>' : '<span class="no">false</span>'));
+  lines.push('navigator.clipboard が存在するか: ' + (navigator.clipboard ? '<span class="yes">あり</span>' : '<span class="no">なし</span>'));
+  lines.push('navigator.share が存在するか: ' + (navigator.share ? '<span class="yes">あり</span>' : '<span class="no">なし</span>'));
+  box.innerHTML = lines.join('\n');
+})();
+
+// ---- 検証1: 範囲選択への印付け ----
+var cpCounter = 0;
+var savedRange = null;
+
+function captureSelection(e) {
+  // ボタンを押した瞬間(mousedown)の時点で選択範囲を保存しておく。
+  // ここでは touchstart は使わない(iOSでpreventDefaultするとタップ後のclickイベント
+  // 自体が発火しなくなり、ボタンが完全に反応しなくなることが分かったため)。
+  if (e && e.cancelable) { e.preventDefault(); }
+  captureCurrentSelectionIfAny();
+}
+
+function captureCurrentSelectionIfAny() {
+  var editable = document.getElementById('editable');
+  var sel = window.getSelection();
+  if (sel && sel.rangeCount > 0 && !sel.isCollapsed && editable.contains(sel.anchorNode)) {
+    savedRange = sel.getRangeAt(0).cloneRange();
+  }
+}
+
+// 保険として、選択状態が変化するたびにも保存しておく(mousedownのタイミングだけに
+// 依存しないようにするため)。ボタンを押す前の「最後の有効な選択範囲」が常に
+// savedRangeに残るようにする。
+document.addEventListener('selectionchange', captureCurrentSelectionIfAny);
+
+function markSelection(type) {
+  if (!savedRange) {
+    log('log1', '範囲が選択されていません(ボタンを押した時点で選択が解除されていた可能性があります)。テキストを長押し→ハンドルをドラッグして選択してからボタンを押してください。', 'ng');
+    return;
+  }
+  var range = savedRange;
+  savedRange = null;
+  var editable = document.getElementById('editable');
+  if (!editable.contains(range.commonAncestorContainer)) {
+    log('log1', '選択範囲が本文エリアの外です。', 'ng');
+    return;
+  }
+
+  try {
+    if (type === 'copybtn') {
+      cpCounter++;
+      var cpId = 'cp-' + cpCounter;
+      var span = document.createElement('span');
+      span.className = 'cp-target';
+      span.id = cpId;
+      span.appendChild(range.extractContents());
+      range.insertNode(span);
+
+      var btn = document.createElement('button');
+      btn.className = 'cp-btn';
+      btn.textContent = '📋コピー';
+      btn.setAttribute('onclick', "copyTarget('" + cpId + "')");
+      span.parentNode.insertBefore(btn, span.nextSibling);
+
+      log('log1', 'コピペボタンを設置しました(範囲: 「' + span.textContent.slice(0, 20) + '…」)', 'ok');
+    } else {
+      var wrapper = document.createElement('span');
+      if (type === 'heading') { wrapper.className = 'heading-mark'; }
+      if (type === 'bold') { wrapper.style.fontWeight = 'bold'; }
+      if (type === 'italic') { wrapper.style.fontStyle = 'italic'; }
+      if (type === 'underline') { wrapper.style.textDecoration = 'underline'; }
+      wrapper.appendChild(range.extractContents());
+      range.insertNode(wrapper);
+      log('log1', '「' + type + '」を選択範囲に適用しました(範囲: 「' + wrapper.textContent.slice(0, 20) + '…」)', 'ok');
+    }
+    window.getSelection().removeAllRanges();
+  } catch (e) {
+    log('log1', '装飾の適用に失敗しました: ' + e.message + '(段落をまたいだ選択だとここで失敗する場合があります)', 'ng');
+  }
+}
+
+function copyTarget(id) {
+  var el = document.getElementById(id);
+  if (!el) { return; }
+  copyText(el.textContent, 'log1');
+}
+
+// ---- 検証2: クリップボードコピー ----
+function testClipboard() {
+  var sample = 'CCB<=70 【アイデア】 (シナリオ整形ツール検証用サンプル)';
+  copyText(sample, 'log2');
+}
+
+function copyText(text, logId) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function () {
+      log(logId, 'navigator.clipboard.writeText で成功しました。', 'ok');
+    }).catch(function (err) {
+      log(logId, 'navigator.clipboard.writeText が失敗: ' + err.name + ' / ' + err.message + '。execCommandのフォールバックを試します。', 'ng');
+      fallbackCopy(text, logId);
+    });
+  } else {
+    log(logId, 'navigator.clipboard.writeText が利用できません。execCommandのフォールバックを試します。', 'ng');
+    fallbackCopy(text, logId);
+  }
+}
+
+function fallbackCopy(text, logId) {
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    var ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok) {
+      log(logId, 'execCommand(\'copy\') で成功しました(フォールバック経由)。', 'ok');
+    } else {
+      log(logId, 'execCommand(\'copy\') も失敗しました。', 'ng');
+    }
+  } catch (e) {
+    log(logId, 'フォールバックも例外で失敗: ' + e.message, 'ng');
+  }
+}
+
+// ---- 検証3: ファイル書き出し ----
+function buildSampleHtml() {
+  return '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>検証用サンプル書き出し</title></head><body><h1>これはテスト書き出しファイルです</h1><p>' + new Date().toISOString() + '</p></body></html>';
+}
+
+function testDownload() {
+  try {
+    var blob = new Blob([buildSampleHtml()], { type: 'text/html' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'テスト書き出し_' + Date.now() + '.html';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+    log('log3', '<a download>を実行しました。実際に「ダウンロード」または「保存」の動きになったか、別タブで中身が表示されただけだったかを見てください。', 'ok');
+  } catch (e) {
+    log('log3', '<a download>の実行中にエラー: ' + e.message, 'ng');
+  }
+}
+
+function testShare() {
+  if (!navigator.share) {
+    log('log3', 'navigator.share (Web Share API) がこの環境では利用できません。', 'ng');
+    return;
+  }
+  try {
+    var blob = new Blob([buildSampleHtml()], { type: 'text/html' });
+    var file = new File([blob], 'テスト書き出し.html', { type: 'text/html' });
+    if (navigator.canShare && !navigator.canShare({ files: [file] })) {
+      log('log3', 'このファイルは共有できないと判定されました(canShareがfalse)。', 'ng');
+      return;
+    }
+    navigator.share({
+      files: [file],
+      title: 'シナリオ整形ツール検証',
+      text: '技術検証プロトタイプからのテスト書き出しです'
+    }).then(function () {
+      log('log3', 'navigator.share が成功しました(共有シートで保存できたか確認してください)。', 'ok');
+    }).catch(function (err) {
+      log('log3', 'navigator.share が失敗またはキャンセル: ' + err.name + ' / ' + err.message, 'ng');
+    });
+  } catch (e) {
+    log('log3', 'navigator.share の実行中にエラー: ' + e.message, 'ng');
+  }
+}
+</script>
+
+</body>
+</html>

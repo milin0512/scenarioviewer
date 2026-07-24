@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>シナリオ整形ツール</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body class="mode-edit">
+
+<header class="app-header">
+  <h1 class="app-header__title">シナリオ整形ツール</h1>
+
+  <div class="mode-switch" id="mode-switch" hidden>
+    <button type="button" class="mode-switch__btn is-active" data-mode="edit" id="btn-mode-edit">編集</button>
+    <button type="button" class="mode-switch__btn" data-mode="preview" id="btn-mode-preview">プレビュー</button>
+  </div>
+
+  <button type="button" class="app-header__menu-btn" id="btn-sidebar-open" hidden aria-label="メニューを開く">☰</button>
+</header>
+
+<div class="sidebar-backdrop" id="sidebar-backdrop" hidden></div>
+<aside class="sidebar" id="sidebar" hidden>
+  <div class="sidebar__header">
+    <span class="sidebar__title" id="sidebar-title">メニュー</span>
+    <button type="button" class="icon-btn" id="btn-sidebar-close" aria-label="閉じる">×</button>
+  </div>
+  <div class="sidebar__export" id="export-bar" hidden>
+    <h3 class="sidebar-section__title">書き出し</h3>
+    <div class="sidebar__export-row">
+      <select id="export-format-select">
+        <option value="html">HTML(セッション用)</option>
+        <option value="markdown">Markdown(記録用)</option>
+        <option value="text">テキスト(.txt)</option>
+      </select>
+      <button type="button" class="btn btn--secondary" id="btn-export-download">書き出す</button>
+    </div>
+  </div>
+  <div class="sidebar__body" id="sidebar-body"></div>
+</aside>
+
+<main>
+
+  <!-- 読み込みエリア -->
+  <section class="panel" id="section-load">
+    <h2 class="panel__title">シナリオを読み込む</h2>
+    <p class="panel__desc">
+      PDF・TXTファイル、または本ツールで書き出したHTMLファイルを選んでください。<br>
+      PDFの場合は文字情報を抽出します(レイアウトによっては抽出結果が乱れる場合があります)。
+    </p>
+    <label class="btn btn--primary btn--block" for="file-input">ファイルを選ぶ</label>
+    <input type="file" id="file-input" accept=".pdf,.txt,.html,application/pdf,text/plain,text/html" hidden />
+    <p class="load-status" id="load-status">まだファイルが読み込まれていません。</p>
+  </section>
+
+  <!-- 編集エリア -->
+  <section class="panel" id="section-editor" hidden>
+    <p class="panel__desc">本文をドラッグして選択すると、見出し化・文字装飾・コピペボタン設置ができる小さなツールバーが出ます。</p>
+    <div class="editor-body" id="editor-body" contenteditable="true" spellcheck="false"></div>
+  </section>
+
+  <!-- プレビューエリア -->
+  <section class="panel panel--preview" id="section-preview" hidden>
+    <div class="preview-layout">
+      <div class="preview-content" id="preview-content"></div>
+      <aside class="toc-panel" id="toc-panel-inline">
+        <h3 class="toc-panel__title">目次</h3>
+        <div id="toc-list-inline" class="toc-list"></div>
+        <h3 class="toc-panel__title toc-panel__title--npc">NPCカード</h3>
+        <div id="npc-cards-inline"></div>
+      </aside>
+    </div>
+  </section>
+
+</main>
+
+<!-- 選択時に出るミニツールバー -->
+<div class="mini-toolbar" id="mini-toolbar" hidden>
+  <button type="button" data-action="heading" title="見出しにする">見出し</button>
+  <button type="button" data-action="bold" title="太字"><b>B</b></button>
+  <button type="button" data-action="italic" title="イタリック"><i>I</i></button>
+  <button type="button" data-action="underline" title="下線"><u>U</u></button>
+  <button type="button" data-action="copybtn" title="コピペボタン設置">📋+</button>
+  <button type="button" data-action="npc" title="選択範囲からNPCカードを作成">👤NPC化</button>
+  <button type="button" data-action="link" title="内部リンクを設定">🔗リンク</button>
+</div>
+
+<!-- 内部リンクのリンク先選択ピッカー -->
+<div class="link-picker-backdrop" id="link-picker-backdrop" hidden></div>
+<div class="link-picker" id="link-picker" hidden>
+  <div class="link-picker__header">
+    <span>リンク先を選択</span>
+    <button type="button" class="icon-btn" id="btn-link-picker-close" aria-label="閉じる">×</button>
+  </div>
+  <div class="link-picker__body" id="link-picker-body"></div>
+</div>
+
+<!-- コピー成否のトースト通知 -->
+<div class="toast" id="toast" hidden></div>
+
+<script src="vendor/pdfjs/pdf.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

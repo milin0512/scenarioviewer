@@ -1,0 +1,645 @@
+:root {
+  --accent: #2196f3;
+  --accent-dark: #1565c0;
+  --danger: #c62828;
+  --bg: #f4f4f2;
+  --panel-bg: #ffffff;
+  --editable-bg: #f0f0ec;
+  --editable-border: #c6c6c0;
+  --border: #ddd6c4;
+  --heading-bg: #d8d8d0;
+  --cp-bg: #e3f1ff;
+  --text: #222222;
+  --text-muted: #555555;
+  --text-faint: #888888;
+  --input-bg: #ffffff;
+  --input-border: #cccccc;
+  --icon-btn-bg: #eeeeee;
+  --btn-secondary-bg: #7a7a72;
+  /* ヘッダーはブランドカラーとして、ダーク/ライトどちらでも固定色にする(2026-07-24、Mikoto要望)。
+     accent系と同じ鮮やかな青で統一(2026-07-24、Mikoto要望・2回目の色調整) */
+  --header-bg: #1976d2;
+  --header-text: #ffffff;
+}
+
+/* ダークモード対応(OSのカラースキーム設定に追従、2026-07-24) */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent: #64b5f6;
+    --accent-dark: #90caf9;
+    --danger: #e57373;
+    --bg: #1c1c1e;
+    --panel-bg: #28282c;
+    --editable-bg: #2a2a2c;
+    --editable-border: #55554f;
+    --border: #47453c;
+    --heading-bg: #8c8c86;
+    --cp-bg: #1e3549;
+    --text: #e8e8e6;
+    --text-muted: #b6b6b2;
+    --text-faint: #8f8f8b;
+    --input-bg: #333338;
+    --input-border: #57574f;
+    --icon-btn-bg: #3a3a3e;
+    --btn-secondary-bg: #6a6a63;
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* [hidden]属性は、他のdisplay指定より必ず優先させる */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", -apple-system, BlinkMacSystemFont, "Segoe UI", "Yu Gothic UI", "Yu Gothic", Meiryo, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.8;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* ============ ヘッダー・モード切替 ============ */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--header-bg);
+  color: var(--header-text);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.app-header__title {
+  font-size: 1.05rem;
+  margin: 0;
+  flex: 1;
+  color: var(--header-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ヘッダーはブランドカラー固定のため、乗せるパーツも(テーマではなく)
+   ヘッダー自身の色を基準にした固定配色にする(2026-07-24、Mikoto要望) */
+.mode-switch {
+  display: flex;
+  border: 1px solid rgba(255,255,255,0.7);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mode-switch__btn {
+  border: none;
+  background: transparent;
+  color: var(--header-text);
+  padding: 8px 14px;
+  font-size: 0.9rem;
+  min-height: 40px;
+}
+
+.mode-switch__btn.is-active {
+  background: var(--header-text);
+  color: var(--header-bg);
+}
+
+.app-header__menu-btn {
+  border: none;
+  background: none;
+  color: var(--header-text);
+  font-size: 1.4rem;
+  min-width: 44px;
+  min-height: 44px;
+  display: none;
+}
+
+body.mode-edit .app-header__menu-btn,
+body.mode-preview .app-header__menu-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* デスクトップのプレビューモードでは目次パネルが常時表示されるが、
+   書き出し操作はハンバーガーメニュー内にあるため、ボタン自体は隠さない
+   (5章UI要望、2026-07-24、書き出しボタンのメニュー移設に伴う変更) */
+
+/* ============ サイドバー(ハンバーガードロワー) ============ */
+
+.sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.35);
+  z-index: 30;
+}
+
+.sidebar {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: min(320px, 85vw);
+  background: var(--panel-bg);
+  color: var(--text);
+  z-index: 31;
+  box-shadow: -2px 0 8px rgba(0,0,0,0.15);
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.sidebar__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.sidebar__title { font-weight: bold; }
+
+.icon-btn {
+  border: none;
+  background: var(--icon-btn-bg);
+  color: var(--text);
+  border-radius: 6px;
+  min-width: 36px;
+  min-height: 36px;
+  font-size: 1.1rem;
+}
+
+/* ============ 内部リンクのリンク先選択ピッカー(5.13) ============ */
+
+.link-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.35);
+  z-index: 45;
+}
+
+.link-picker {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(360px, 90vw);
+  max-height: 80vh;
+  background: var(--panel-bg);
+  color: var(--text);
+  z-index: 46;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+  border-radius: 10px;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.link-picker__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  font-weight: bold;
+}
+
+.link-picker__section { margin-bottom: 14px; }
+
+.link-picker__section-title {
+  font-size: 0.85rem;
+  color: var(--text-faint);
+  margin: 0 0 6px;
+}
+
+.link-picker__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  background: var(--panel-bg);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 4px;
+  font-size: 0.9rem;
+  min-height: 40px;
+}
+
+.link-picker__item:active { background: var(--bg); }
+
+/* ハンバーガーメニュー内の複数セクション(アウトライン+NPC管理など、5.2参照) */
+.sidebar-section { margin-bottom: 20px; }
+
+.sidebar-section__title {
+  font-size: 0.9rem;
+  margin: 0 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  color: var(--accent-dark);
+}
+
+/* ============ 汎用ボタン・パネル ============ */
+
+.btn {
+  display: inline-block;
+  border: none;
+  border-radius: 6px;
+  padding: 10px 16px;
+  font-size: 0.95rem;
+  min-height: 44px;
+  text-align: center;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.btn--primary { background: var(--accent); color: #fff; }
+.btn--secondary { background: var(--btn-secondary-bg); color: #fff; }
+.btn--danger { background: var(--danger); color: #fff; }
+.btn--block { display: block; width: 100%; }
+.btn--small { padding: 6px 10px; min-height: 36px; font-size: 0.85rem; }
+.btn:active { opacity: 0.75; }
+
+.panel {
+  background: var(--panel-bg);
+  border-radius: 8px;
+  padding: 14px;
+  margin: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+
+.panel__title { font-size: 1rem; margin: 0 0 8px; }
+.panel__desc { font-size: 0.85rem; color: var(--text-muted); margin: 0 0 10px; }
+
+/* 編集エリアの説明文は、下のグレー枠(.editor-body、max-width:720px)と
+   横位置が揃うようにする(2026-07-24、Mikoto報告・修正済み)。 */
+#section-editor .panel__desc { max-width: 720px; margin: 0 auto 10px; }
+.load-status { font-size: 0.85rem; color: var(--text-muted); margin-top: 8px; }
+
+/* ============ 編集エリア ============ */
+
+.editor-body {
+  background: var(--editable-bg);
+  color: var(--text);
+  border: 1px dashed var(--editable-border);
+  border-radius: 6px;
+  padding: 14px;
+  min-height: 200px;
+  font-size: 0.95rem;
+  max-width: 720px;
+  margin: 0 auto;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.editor-body p { margin: 0 0 0.9em; }
+
+.h-mark {
+  display: inline-block;
+  font-weight: bold;
+  font-size: 1.05em;
+  background: var(--heading-bg);
+  border-left: 3px solid var(--accent-dark);
+  padding: 1px 6px 1px 8px;
+  border-radius: 3px;
+}
+
+/* コピー範囲は引用ブロックのようにまとめて表示する(2026-07-23、Mikoto要望) */
+.cp-wrap {
+  display: block;
+  border-left: 3px solid var(--accent);
+  background: var(--cp-bg);
+  padding: 8px 10px;
+  margin: 8px 0;
+  border-radius: 0 6px 6px 0;
+}
+
+.cp-target { display: block; margin-bottom: 6px; }
+
+.cp-btn {
+  display: inline-block;
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  min-height: auto;
+  border: none;
+  border-radius: 5px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+/* ============ トースト通知 ============ */
+
+.toast {
+  position: fixed;
+  bottom: 70px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #263238;
+  color: #fff;
+  padding: 8px 18px;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  z-index: 50;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  max-width: 90vw;
+  text-align: center;
+}
+
+.toast.is-error { background: var(--danger); }
+
+/* ============ ミニツールバー ============ */
+
+.mini-toolbar {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  gap: 4px;
+  background: #263238;
+  border-radius: 8px;
+  padding: 6px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+.mini-toolbar button {
+  border: none;
+  background: #37474f;
+  color: #fff;
+  border-radius: 6px;
+  min-width: 40px;
+  min-height: 40px;
+  font-size: 0.95rem;
+}
+
+.mini-toolbar button:active { background: var(--accent); }
+
+/* ============ アウトラインビュー ============ */
+
+.outline-list { display: flex; flex-direction: column; gap: 8px; }
+
+.outline-item {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.outline-item__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.outline-item__level {
+  font-size: 0.75rem;
+  color: var(--text-faint);
+  min-width: 42px;
+}
+
+.outline-item__text {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.9rem;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 6px;
+}
+
+.outline-item__toggle {
+  flex-shrink: 0;
+  border: none;
+  background: var(--icon-btn-bg);
+  color: var(--text-muted);
+  border-radius: 6px;
+  min-width: 34px;
+  min-height: 34px;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.outline-item__toggle:active { background: var(--accent); color: #fff; }
+
+.outline-item__actions {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+}
+
+.outline-item__action-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 6px 2px;
+  min-height: 38px;
+  font-size: 0.95rem;
+  text-align: center;
+}
+
+.outline-empty { font-size: 0.85rem; color: var(--text-faint); }
+
+/* ============ NPC管理フォーム(5.10、編集モード) ============ */
+
+.npc-edit-form {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+
+.npc-edit-form__field { margin-bottom: 10px; }
+
+.npc-edit-form__label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.npc-edit-form__input,
+.npc-edit-form__textarea {
+  width: 100%;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 6px;
+  font-size: 0.85rem;
+  box-sizing: border-box;
+  font-family: inherit;
+}
+
+.npc-edit-form__textarea { resize: vertical; }
+
+/* ============ 編集ツール(空行削除・検索置換、ハンバーガーメニュー内) ============ */
+
+.edit-tools__subtitle {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin: 14px 0 8px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.npc-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+  align-items: center;
+}
+
+.npc-row__input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 5px;
+  font-size: 0.82rem;
+}
+
+.npc-row__del {
+  flex-shrink: 0;
+  min-width: 30px;
+  min-height: 30px;
+  font-size: 0.9rem;
+}
+
+/* ============ NPCカード(5.10・5.11、プレビューモード) ============ */
+
+.npc-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 12px;
+  background: var(--panel-bg);
+}
+
+.npc-card__name { font-weight: bold; font-size: 1rem; margin-bottom: 4px; }
+
+.npc-card__profile {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  margin: 0 0 8px;
+}
+
+.npc-card__section { margin-bottom: 8px; }
+.npc-card__section-title { font-size: 0.78rem; color: var(--text-faint); margin-bottom: 4px; }
+
+.npc-card__stat-grid { display: flex; flex-wrap: wrap; gap: 4px 8px; }
+
+.npc-card__stat-cell {
+  font-size: 0.8rem;
+  background: var(--bg);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.npc-card__skills { display: flex; flex-direction: column; gap: 2px; }
+.npc-card__skill-line { font-size: 0.78rem; font-family: monospace; }
+
+.npc-card__actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+
+/* リンクからジャンプしてきたNPCカードを一時的に目立たせる(5.13) */
+.npc-card--highlight { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+/* ============ 内部リンク(5.13) ============ */
+
+.int-link {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+/* ============ プレビュー・トグル ============ */
+
+.preview-layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.preview-content {
+  flex: 1;
+  min-width: 0;
+  max-width: 720px;
+  margin: 0 auto;
+  background: var(--panel-bg);
+  border-radius: 8px;
+  padding: 14px;
+  font-size: 0.95rem;
+}
+
+.preview-content p { margin: 0 0 0.9em; }
+
+.toggle-block {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin: 0 0 10px;
+}
+
+.toggle-block > summary {
+  font-weight: bold;
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.toggle-body { padding-left: 4px; margin-top: 6px; }
+.toggle-body .toggle-block { margin-left: 4px; }
+
+.toc-panel {
+  display: none;
+  width: 280px;
+  flex-shrink: 0;
+  background: var(--panel-bg);
+  border-radius: 8px;
+  padding: 12px;
+  position: sticky;
+  top: 70px;
+  max-height: calc(100vh - 90px);
+  overflow-y: auto;
+}
+
+@media (min-width: 900px) {
+  body.mode-preview .toc-panel { display: block; }
+}
+
+.toc-panel__title { font-size: 0.95rem; margin: 0 0 8px; }
+.toc-panel__title--npc { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border); }
+
+.toc-list a {
+  display: block;
+  padding: 4px 0;
+  font-size: 0.85rem;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.toc-list a:active { text-decoration: underline; }
+
+/* ============ 書き出し(ハンバーガーメニュー内、5章UI要望) ============ */
+
+.sidebar__export {
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar__export-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.sidebar__export-row select {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--input-border);
+  font-size: 0.85rem;
+  background: var(--input-bg);
+  color: var(--text);
+}
+
+.sidebar__export-row button { flex-shrink: 0; }
