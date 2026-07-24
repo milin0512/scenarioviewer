@@ -867,6 +867,12 @@ function wrapAsCpTarget(fragment, cpId) {
 // (2026-07-25、Mikoto報告)。そのため、段落ごとに個別の.cp-wrapで包み、
 // 同じcpidを共有させることで「1つのコピー範囲」として扱う。コピーボタンは
 // 最後の段落のwrapperにだけ設置する。
+//
+// ただし段落ごとに別々の.cp-wrapになったことで、見た目が1行ごとに区切られた
+// 状態になってしまった(2026-07-25、Mikoto報告)。そのため各wrapperに
+// cp-wrap--first/mid/lastを付けて継ぎ目なく連結して見えるようにし、さらに
+// 最後の段落以外は<p>自体の下マージンを0にして段落間の隙間を消している
+// (解除時はremoveCopyButtonMarkで元に戻す)。
 function applyCopyButtonMark(range) {
   cpCounter++;
   const cpId = "cp_" + cpCounter + "_" + Date.now().toString(36);
@@ -888,13 +894,22 @@ function applyCopyButtonMark(range) {
     subRange.setEnd(p === lastP ? range.endContainer : p, p === lastP ? range.endOffset : p.childNodes.length);
 
     const wrapper = wrapAsCpTarget(subRange.extractContents(), cpId);
-    if (p === lastP) wrapper.appendChild(buildCpButton(cpId));
+    if (p === firstP) wrapper.classList.add("cp-wrap--first");
+    else if (p === lastP) wrapper.classList.add("cp-wrap--last");
+    else wrapper.classList.add("cp-wrap--mid");
+
+    if (p === lastP) {
+      wrapper.appendChild(buildCpButton(cpId));
+    } else {
+      p.style.marginBottom = "0";
+    }
     subRange.insertNode(wrapper);
   });
 }
 
 // 複数段落にまたがるコピー範囲は、同じcpidを持つ.cp-wrapが複数存在しうるため、
 // 見つかった1つだけでなく同じcpidのものをすべて解除する(2026-07-25、Mikoto報告・修正)。
+// applyCopyButtonMarkで0にした<p>の下マージンもここで元に戻す。
 function removeCopyButtonMark(wrapperEl) {
   const cpId = wrapperEl.dataset.cpid;
   const wrappers = cpId
@@ -907,6 +922,7 @@ function removeCopyButtonMark(wrapperEl) {
       while (target.firstChild) parent.insertBefore(target.firstChild, w);
     }
     w.remove();
+    if (parent && parent.style) parent.style.marginBottom = "";
   });
 }
 

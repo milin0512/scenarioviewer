@@ -321,6 +321,16 @@ body.mode-preview .app-header__menu-btn {
   border-radius: 0 6px 6px 0;
 }
 
+/* 複数段落にまたがるコピー範囲は、段落ごとに個別の.cp-wrapで包んでいる
+   (app.jsのapplyCopyButtonMark参照)が、見た目は1つの引用ブロックとして
+   つながって見えるよう、先頭/中間/末尾で余白・角丸を継ぎ目なく調整する
+   (2026-07-25、Mikoto報告: 修正直後に1行ごとの表示になってしまったため復元) */
+.cp-wrap--first { margin-bottom: 0; border-radius: 0 6px 0 0; }
+.cp-wrap--mid { margin-top: 0; margin-bottom: 0; border-radius: 0; }
+.cp-wrap--last { margin-top: 0; border-radius: 0 0 6px 0; }
+.cp-wrap--first .cp-target,
+.cp-wrap--mid .cp-target { margin-bottom: 0; }
+
 .cp-target { display: block; margin-bottom: 6px; }
 
 .cp-btn {
