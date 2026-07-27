@@ -475,10 +475,59 @@ function renderEditToolsView(container) {
   });
   container.appendChild(btn);
 
-  // 検索と置換(2026-07-24、Mikoto要望)。例: 本文中の「KPC」を一括で「{KPC}」に置換したい、など。
+  // 検索(2026-07-27、Mikoto要望により置換機能から分離)。置換を伴わず、
+  // 本文中の一致箇所数を確認したり、最初の一致箇所にジャンプしたいだけの
+  // ケース向け。
+  const searchTitle = document.createElement("p");
+  searchTitle.className = "edit-tools__subtitle";
+  searchTitle.textContent = "検索";
+  container.appendChild(searchTitle);
+
+  const searchOnlyField = document.createElement("div");
+  searchOnlyField.className = "npc-edit-form__field";
+  const searchOnlyLabel = document.createElement("label");
+  searchOnlyLabel.className = "npc-edit-form__label";
+  searchOnlyLabel.textContent = "検索する文字列";
+  const searchOnlyInput = document.createElement("input");
+  searchOnlyInput.type = "text";
+  searchOnlyInput.className = "npc-edit-form__input";
+  searchOnlyInput.placeholder = "例: KPC";
+  searchOnlyField.appendChild(searchOnlyLabel);
+  searchOnlyField.appendChild(searchOnlyInput);
+  container.appendChild(searchOnlyField);
+
+  const searchBtn = document.createElement("button");
+  searchBtn.type = "button";
+  searchBtn.className = "btn btn--secondary btn--block";
+  searchBtn.textContent = "検索する";
+  searchBtn.addEventListener("click", () => {
+    const searchTerm = searchOnlyInput.value;
+    if (!searchTerm) {
+      showToast("検索する文字列を入力してください。", true);
+      return;
+    }
+    const { count, firstRange } = findInEditor(searchTerm);
+    if (count === 0) {
+      showToast(`「${searchTerm}」は見つかりませんでした。`);
+      return;
+    }
+    el.editorBody.focus({ preventScroll: true });
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(firstRange);
+    const target = firstRange.startContainer.nodeType === 3
+      ? firstRange.startContainer.parentElement
+      : firstRange.startContainer;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    showToast(`「${searchTerm}」が${count}件見つかりました(先頭の一致箇所を選択しました)。`);
+  });
+  container.appendChild(searchBtn);
+
+  // 一括置換(2026-07-24、Mikoto要望)。例: 本文中の「KPC」を一括で「{KPC}」に置換したい、など。
+  // 2026-07-27、Mikoto要望により検索(上記)とは別の入力欄・別のボタンに分離した。
   const frTitle = document.createElement("p");
   frTitle.className = "edit-tools__subtitle";
-  frTitle.textContent = "検索と置換";
+  frTitle.textContent = "一括置換";
   container.appendChild(frTitle);
 
   const searchField = document.createElement("div");
@@ -534,6 +583,29 @@ function renderEditToolsView(container) {
 
 function escapeRegExp(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// 検索のみ(置換なし)。本文中のテキストノードを走査し、一致件数と最初の
+// 一致箇所のRangeを返す(2026-07-27、Mikoto要望により一括置換から分離)。
+function findInEditor(searchTerm) {
+  const walker = document.createTreeWalker(el.editorBody, NodeFilter.SHOW_TEXT, null);
+  const re = new RegExp(escapeRegExp(searchTerm), "g");
+  let count = 0;
+  let firstRange = null;
+  let node;
+  while ((node = walker.nextNode())) {
+    re.lastIndex = 0;
+    let match;
+    while ((match = re.exec(node.nodeValue))) {
+      count++;
+      if (!firstRange) {
+        firstRange = document.createRange();
+        firstRange.setStart(node, match.index);
+        firstRange.setEnd(node, match.index + match[0].length);
+      }
+    }
+  }
+  return { count, firstRange };
 }
 
 // 本文中のテキストノードを走査し、単純な文字列一致で一括置換する。
@@ -2057,13 +2129,13 @@ function buildNpcStatTableHtml(title, rows, withMax) {
 
 const STANDALONE_CSS = `
 :root {
-  --accent:#2196f3; --danger:#c62828; --bg:#f4f4f2; --panel-bg:#ffffff;
-  --border:#ddd6c4; --cp-bg:#e3f1ff; --text:#222222; --text-muted:#555555; --text-faint:#888888;
+  --accent:#ff9500; --danger:#c62828; --bg:#f4f4f2; --panel-bg:#ffffff;
+  --border:#ddd6c4; --cp-bg:#ffe9cc; --text:#222222; --text-muted:#555555; --text-faint:#888888;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --accent:#64b5f6; --danger:#e57373; --bg:#1c1c1e; --panel-bg:#28282c;
-    --border:#47453c; --cp-bg:#1e3549; --text:#e8e8e6; --text-muted:#b6b6b2; --text-faint:#8f8f8b;
+    --accent:#ff9f0a; --danger:#e57373; --bg:#1c1c1e; --panel-bg:#28282c;
+    --border:#47453c; --cp-bg:#3d2b0a; --text:#e8e8e6; --text-muted:#b6b6b2; --text-faint:#8f8f8b;
   }
 }
 body { font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", -apple-system, BlinkMacSystemFont, "Segoe UI", "Yu Gothic UI", "Yu Gothic", Meiryo, sans-serif; margin:0; padding:12px; background:var(--bg); color:var(--text); line-height:1.8; }

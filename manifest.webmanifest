@@ -1,0 +1,11 @@
+{
+  "name": "シナリオ整形ツール",
+  "short_name": "シナリオ整形",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#f4f4f2",
+  "theme_color": "#ff9500",
+  "icons": [
+    { "src": "icon.png", "sizes": "400x400", "type": "image/png" }
+  ]
+}

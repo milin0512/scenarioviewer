@@ -1,6 +1,12 @@
 :root {
-  --accent: #2196f3;
-  --accent-dark: #1565c0;
+  /* 青系ブランドカラーはダークモードで見づらいとの指摘(2026-07-27、Mikoto要望)により
+     オレンジ系に変更。さらに「iOSのsystem colorのorange」を想定色として指定された
+     ため(2026-07-27)、AppleのHuman Interface Guidelinesで定義されているiOS標準の
+     systemOrange(ライト#FF9500/ダーク#FF9F0A)をそのまま採用した。 */
+  --accent: #ff9500;
+  /* メニューの見出し文字(編集ツール/アウトラインなど)が見づらいとの指摘(2026-07-27、
+     Mikoto報告)により、より濃いオレンジに変更した。 */
+  --accent-dark: #7a4700;
   --danger: #c62828;
   --bg: #f4f4f2;
   --panel-bg: #ffffff;
@@ -8,7 +14,7 @@
   --editable-border: #c6c6c0;
   --border: #ddd6c4;
   --heading-bg: #d8d8d0;
-  --cp-bg: #e3f1ff;
+  --cp-bg: #ffe9cc;
   --text: #222222;
   --text-muted: #555555;
   --text-faint: #888888;
@@ -17,16 +23,24 @@
   --icon-btn-bg: #eeeeee;
   --btn-secondary-bg: #7a7a72;
   /* ヘッダーはブランドカラーとして、ダーク/ライトどちらでも固定色にする(2026-07-24、Mikoto要望)。
-     accent系と同じ鮮やかな青で統一(2026-07-24、Mikoto要望・2回目の色調整) */
-  --header-bg: #1976d2;
+     2026-07-27にオレンジ(iOS systemOrangeのライト値)へ変更。 */
+  --header-bg: #ff9500;
   --header-text: #ffffff;
+  /* 編集用リボン(.mini-toolbar)は元々ダーク固定色だったが、ライトモードで
+     周囲より暗く浮いてしまうとの指摘(2026-07-27、Mikoto報告)により、
+     テーマに応じて色が変わるようにした。 */
+  --toolbar-bg: #dcdcdc;
+  --toolbar-btn-bg: #f3f3f3;
+  --toolbar-btn-text: #222222;
+  --toolbar-sep: rgba(0, 0, 0, 0.15);
 }
 
 /* ダークモード対応(OSのカラースキーム設定に追従、2026-07-24) */
 @media (prefers-color-scheme: dark) {
   :root {
-    --accent: #64b5f6;
-    --accent-dark: #90caf9;
+    /* iOS systemOrangeのダーク値(#FF9F0A)を採用(2026-07-27) */
+    --accent: #ff9f0a;
+    --accent-dark: #ffc770;
     --danger: #e57373;
     --bg: #1c1c1e;
     --panel-bg: #28282c;
@@ -34,7 +48,7 @@
     --editable-border: #55554f;
     --border: #47453c;
     --heading-bg: #8c8c86;
-    --cp-bg: #1e3549;
+    --cp-bg: #3d2b0a;
     --text: #e8e8e6;
     --text-muted: #b6b6b2;
     --text-faint: #8f8f8b;
@@ -42,6 +56,10 @@
     --input-border: #57574f;
     --icon-btn-bg: #3a3a3e;
     --btn-secondary-bg: #6a6a63;
+    --toolbar-bg: #263238;
+    --toolbar-btn-bg: #37474f;
+    --toolbar-btn-text: #ffffff;
+    --toolbar-sep: rgba(255, 255, 255, 0.2);
   }
 }
 
@@ -374,7 +392,7 @@ body.mode-preview .app-header__menu-btn {
   display: flex;
   align-items: center;
   gap: 4px;
-  background: #263238;
+  background: var(--toolbar-bg);
   padding: 6px 8px;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
@@ -383,8 +401,8 @@ body.mode-preview .app-header__menu-btn {
 .mini-toolbar button {
   flex: 0 0 auto;
   border: none;
-  background: #37474f;
-  color: #fff;
+  background: var(--toolbar-btn-bg);
+  color: var(--toolbar-btn-text);
   border-radius: 6px;
   min-width: 40px;
   min-height: 40px;
@@ -392,7 +410,7 @@ body.mode-preview .app-header__menu-btn {
   white-space: nowrap;
 }
 
-.mini-toolbar button:active { background: var(--accent); }
+.mini-toolbar button:active { background: var(--accent); color: #fff; }
 
 .mini-toolbar button:disabled {
   opacity: 0.4;
@@ -403,7 +421,7 @@ body.mode-preview .app-header__menu-btn {
   width: 1px;
   align-self: stretch;
   margin: 4px 2px;
-  background: rgba(255,255,255,0.2);
+  background: var(--toolbar-sep);
 }
 
 /* ============ アウトラインビュー ============ */
