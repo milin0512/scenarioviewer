@@ -52,6 +52,17 @@ const el = {
 
   miniToolbar: document.getElementById("mini-toolbar"),
   btnUndo: document.getElementById("btn-undo"),
+  btnFindToggle: document.getElementById("btn-find-toggle"),
+  btnRemoveEmptyLines: document.getElementById("btn-remove-empty-lines"),
+  findBar: document.getElementById("find-bar"),
+  findInput: document.getElementById("find-input"),
+  btnFindRun: document.getElementById("btn-find-run"),
+  btnFindPrev: document.getElementById("btn-find-prev"),
+  btnFindNext: document.getElementById("btn-find-next"),
+  btnFindClose: document.getElementById("btn-find-close"),
+  replaceInput: document.getElementById("replace-input"),
+  btnReplaceAll: document.getElementById("btn-replace-all"),
+  findStatus: document.getElementById("find-status"),
   exportBar: document.getElementById("export-bar"),
   exportFormatSelect: document.getElementById("export-format-select"),
   btnExportDownload: document.getElementById("btn-export-download"),
@@ -83,31 +94,106 @@ const state = {
  * 読み込み(5.1・5.15)
  * ========================================================== */
 
-el.fileInput.addEventListener("change", () => {
-  const file = el.fileInput.files[0];
-  if (!file) return;
+// 複数ファイルの同時読み込みに対応する(2026-07-27、Mikoto要望)。シナリオがシーンごとに
+// 複数のTXTに分かれて書かれている場合があるため、選んだ順に上から連結して1本の本文にする。
+// 読み込み済みの状態からさらに追加したい場合のために、置き換え(replace)と末尾追加(append)の
+// 2モードを持たせている(サイドバー最下部のボタンから呼ぶ。5.1参照)。
+let pendingLoadMode = "replace";
 
+el.fileInput.addEventListener("change", () => {
+  const files = Array.from(el.fileInput.files || []);
+  const mode = pendingLoadMode;
+  pendingLoadMode = "replace";
+  // 同じファイルを続けて選び直せるよう、値をクリアしておく(changeイベントが発火しなくなるため)。
+  el.fileInput.value = "";
+  if (files.length === 0) return;
+  loadFiles(files, mode);
+});
+
+async function loadFiles(files, mode) {
+  el.loadStatus.textContent =
+    files.length > 1 ? `${files.length}件のファイルを読み込んでいます…` : "ファイルを読み込んでいます…";
+  const parts = [];
+  for (const file of files) {
+    try {
+      parts.push(await readFileAsPart(file));
+    } catch (e) {
+      console.error(e);
+      el.loadStatus.textContent = `「${file.name}」の読み込みに失敗しました: ${e.message}`;
+      return;
+    }
+  }
+  applyLoadedParts(parts, mode);
+}
+
+// 1ファイルを読み込み、本文HTML・NPC・表示用のラベルに変換する(実際の反映はapplyLoadedParts)。
+async function readFileAsPart(file) {
   const isPdf = /\.pdf$/i.test(file.name) || file.type === "application/pdf";
   if (isPdf) {
-    handlePdfFile(file);
+    const text = await extractPdfText(file);
+    return { fileName: file.name, kind: "PDF", html: plainTextToParagraphsHtml(text), npcs: [] };
+  }
+
+  const buffer = await file.arrayBuffer();
+  const text = decodeTextFile(buffer);
+  const isHtml = /\.html?$/i.test(file.name) || /<html[\s>]/i.test(text.slice(0, 500));
+  if (isHtml) {
+    const data = parseToolExportedHtml(text);
+    return {
+      fileName: file.name,
+      kind: "本ツールで書き出したHTML",
+      html: data.bodyHtml || "",
+      npcs: Array.isArray(data.npcs) ? data.npcs : [],
+      meta: data,
+    };
+  }
+  return { fileName: file.name, kind: "TXT", html: plainTextToParagraphsHtml(text), npcs: [] };
+}
+
+function applyLoadedParts(parts, mode) {
+  const html = parts.map((p) => p.html).join("\n");
+  const npcs = parts.reduce((acc, p) => acc.concat(p.npcs), []);
+  const names = parts.map((p) => p.fileName).join(" / ");
+
+  if (mode === "append") {
+    // 追加読み込みは「元に戻す」で取り消せるようにする(2026-07-27)。
+    pushUndoSnapshot();
+    el.editorBody.innerHTML = el.editorBody.innerHTML + "\n" + html;
+    state.npcs = state.npcs.concat(npcs);
+    state.meta.sourceFileName = state.meta.sourceFileName
+      ? `${state.meta.sourceFileName} / ${names}`
+      : names;
+    el.loadStatus.textContent = `読み込み済み: ${state.meta.sourceFileName}`;
+    clearSearchHighlights();
+    syncAllHeadingIndents();
+    scheduleAutoRender();
+    renderSidebarBody();
+    showToast(`${parts.length}件のファイルを末尾に追加しました。`);
     return;
   }
 
-  const reader = new FileReader();
-  reader.onload = () => {
-    const text = decodeTextFile(reader.result);
-    const isHtml = /\.html?$/i.test(file.name) || /<html[\s>]/i.test(text.slice(0, 500));
-    if (isHtml) {
-      loadFromHtmlString(text, file.name);
-    } else {
-      loadFromPlainText(text, file.name, "新規読み込み(TXT)");
-    }
+  el.editorBody.innerHTML = html;
+  // 本ツールで書き出したHTMLが含まれる場合は、その保存情報を引き継ぐ(複数ある場合は最初のもの)。
+  const exported = parts.find((p) => p.meta);
+  state.meta = {
+    schemaVersion: (exported && exported.meta.schemaVersion) || SCHEMA_VERSION,
+    savedAt: (exported && exported.meta.savedAt) || null,
+    sourceFileName: names,
   };
-  reader.onerror = () => {
-    el.loadStatus.textContent = "ファイルの読み込みに失敗しました。";
-  };
-  reader.readAsArrayBuffer(file);
-});
+  state.npcs = npcs;
+  const kindLabel = parts.length > 1 ? `${parts.length}ファイルを連結` : parts[0].kind;
+  finishLoad(names, kindLabel);
+}
+
+function plainTextToParagraphsHtml(text) {
+  // 空行は&nbsp;(実体は半角スペース相当の文字)ではなく<br>で高さを保持する。
+  // &nbsp;だと選択・コピー・NPC自動抽出時などに余分な空白文字として残ってしまうため
+  // (2026-07-24、Mikoto報告)。
+  return text
+    .split(/\r\n|\r|\n/)
+    .map((line) => (line ? `<p>${escapeHtml(line)}</p>` : "<p><br></p>"))
+    .join("\n");
+}
 
 // UTF-8として厳密デコードを試み、失敗したらShift-JIS(CP932)として読み直す。
 // Windowsで作成されたシナリオTXTにはShift-JIS保存のものが少なくなく、これをUTF-8前提で
@@ -121,18 +207,6 @@ function decodeTextFile(arrayBuffer) {
   }
 }
 
-function loadFromPlainText(text, fileName, kindLabel) {
-  const lines = text.split(/\r\n|\r|\n/);
-  // 空行は&nbsp;(実体は半角スペース相当の文字)ではなく<br>で高さを保持する。
-  // &nbsp;だと選択・コピー・NPC自動抽出時などに余分な空白文字として残ってしまうため
-  // (2026-07-24、Mikoto報告)。
-  el.editorBody.innerHTML = lines
-    .map((line) => (line ? `<p>${escapeHtml(line)}</p>` : "<p><br></p>"))
-    .join("\n");
-  state.meta = { schemaVersion: SCHEMA_VERSION, savedAt: null, sourceFileName: fileName };
-  state.npcs = [];
-  finishLoad(fileName, kindLabel || "新規読み込み(TXT)");
-}
 
 /* ============================================================
  * PDF読み込み(5.1・4章)
@@ -147,27 +221,21 @@ if (window.pdfjsLib) {
   window.pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdfjs/pdf.worker.min.js";
 }
 
-async function handlePdfFile(file) {
-  el.loadStatus.textContent = "PDFを解析しています…";
-  try {
-    if (!window.pdfjsLib) throw new Error("pdf.jsの読み込みに失敗しています。");
-    const pdfjsLib = window.pdfjsLib;
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+async function extractPdfText(file) {
+  el.loadStatus.textContent = `PDF「${file.name}」を解析しています…`;
+  if (!window.pdfjsLib) throw new Error("pdf.jsの読み込みに失敗しています。");
+  const pdfjsLib = window.pdfjsLib;
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
 
-    const pageTexts = [];
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const textContent = await page.getTextContent();
-      const viewport = page.getViewport({ scale: 1 });
-      pageTexts.push(buildPdfPageText(textContent, viewport.height));
-    }
-
-    loadFromPlainText(pageTexts.join("\n\n"), file.name, "新規読み込み(PDF)");
-  } catch (e) {
-    console.error(e);
-    el.loadStatus.textContent = "PDFの解析に失敗しました: " + e.message;
+  const pageTexts = [];
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const textContent = await page.getTextContent();
+    const viewport = page.getViewport({ scale: 1 });
+    pageTexts.push(buildPdfPageText(textContent, viewport.height));
   }
+  return pageTexts.join("\n\n");
 }
 
 // ページ内のテキスト断片をY座標(行)でグループ化し、X座標順に並べて行を復元する。
@@ -330,29 +398,18 @@ function median(nums) {
   return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-function loadFromHtmlString(htmlString, fileName) {
+// 本ツールで書き出したHTML(隠しJSONつき、5.15)から編集データを取り出す。
+function parseToolExportedHtml(htmlString) {
   const doc = new DOMParser().parseFromString(htmlString, "text/html");
   const scriptEl = doc.getElementById(STATE_SCRIPT_ID);
   if (!scriptEl) {
-    el.loadStatus.textContent =
-      "このHTMLは本ツールで書き出した編集用データを含んでいないため、読み込めませんでした。";
-    return;
+    throw new Error("本ツールで書き出した編集用データを含んでいないHTMLです");
   }
-  let data;
   try {
-    data = JSON.parse(scriptEl.textContent);
+    return JSON.parse(scriptEl.textContent);
   } catch (e) {
-    el.loadStatus.textContent = "編集データの解析に失敗しました。";
-    return;
+    throw new Error("編集データの解析に失敗しました");
   }
-  el.editorBody.innerHTML = data.bodyHtml || "";
-  state.meta = {
-    schemaVersion: data.schemaVersion || SCHEMA_VERSION,
-    savedAt: data.savedAt || null,
-    sourceFileName: data.sourceFileName || fileName,
-  };
-  state.npcs = Array.isArray(data.npcs) ? data.npcs : [];
-  finishLoad(fileName, "再読み込み(本ツールで書き出したHTML)");
 }
 
 function finishLoad(fileName, kindLabel) {
@@ -362,6 +419,7 @@ function finishLoad(fileName, kindLabel) {
   el.modeSwitch.hidden = false;
   el.exportBar.hidden = false;
   el.sidebarOpenBtn.hidden = false;
+  clearSearchHighlights();
   syncAllHeadingIndents();
   // 新しいファイルを読み込んだら、それ以前の編集内容に戻れても意味がないため
   // 元に戻す履歴もリセットする(2026-07-25)。
@@ -430,15 +488,54 @@ el.sidebarBackdrop.addEventListener("click", closeSidebar);
 function renderSidebarBody() {
   el.sidebarBody.innerHTML = "";
   if (state.mode === "edit") {
-    // 空行削除は書き出しボタンのすぐ下に来るよう、アウトラインより先に配置する
-    // (2026-07-24、Mikoto要望)。
-    el.sidebarBody.appendChild(buildSidebarSection("編集ツール", renderEditToolsView));
+    // 旧「編集ツール」セクション(空行削除・検索・一括置換)は、サイドバーが長くなりすぎたため
+    // 上部リボンと検索バーへ移した(2026-07-27、Mikoto要望。5.3・5.16参照)。
     el.sidebarBody.appendChild(buildSidebarSection("アウトライン", renderOutlineView));
     el.sidebarBody.appendChild(buildSidebarSection("NPC管理", renderNpcManageView));
   } else {
     el.sidebarBody.appendChild(buildSidebarSection("目次", renderTocList));
     el.sidebarBody.appendChild(buildSidebarSection("NPCカード", renderNpcCardView));
   }
+  // ファイル操作はメニューの最下部に置く(2026-07-27、Mikoto要望)。
+  el.sidebarBody.appendChild(buildSidebarSection("ファイル", renderFileToolsView));
+}
+
+// ホーム画面に追加した状態(スタンドアロン表示)ではブラウザのリロードが使えず、
+// 一度ファイルを読み込むと別のファイルに切り替えられなくなるため、メニュー最下部から
+// 読み込み直せるようにする(2026-07-27、Mikoto要望)。あわせて、シーンごとに分かれた
+// TXTを後から継ぎ足せるよう「追加で読み込む」も用意している。
+function renderFileToolsView(container) {
+  const current = document.createElement("p");
+  current.className = "edit-tools__note";
+  current.textContent = state.meta.sourceFileName
+    ? `現在: ${state.meta.sourceFileName}`
+    : "現在: (ファイル未読み込み)";
+  container.appendChild(current);
+
+  const appendBtn = document.createElement("button");
+  appendBtn.type = "button";
+  appendBtn.className = "btn btn--secondary btn--block";
+  appendBtn.textContent = "ファイルを追加で読み込む(末尾に追加)";
+  appendBtn.addEventListener("click", () => {
+    pendingLoadMode = "append";
+    el.fileInput.click();
+  });
+  container.appendChild(appendBtn);
+
+  const reloadBtn = document.createElement("button");
+  reloadBtn.type = "button";
+  reloadBtn.className = "btn btn--secondary btn--block";
+  reloadBtn.textContent = "別のファイルを読み込み直す(入れ替え)";
+  reloadBtn.addEventListener("click", () => {
+    const ok = window.confirm(
+      "現在の編集内容を破棄して、別のファイルを読み込み直します。よろしいですか?\n" +
+        "(書き出していない見出し・NPC・装飾はすべて失われます)"
+    );
+    if (!ok) return;
+    pendingLoadMode = "replace";
+    el.fileInput.click();
+  });
+  container.appendChild(reloadBtn);
 }
 
 function buildSidebarSection(title, renderFn) {
@@ -454,158 +551,216 @@ function buildSidebarSection(title, renderFn) {
   return section;
 }
 
-// 空行の一括削除ボタン(5章UI要望、2026-07-24)。段落単位の空<p>のみを対象とし、
-// 見出しや本文が入っている段落は(テキストが残るため)誤って消えないようにする。
-function renderEditToolsView(container) {
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "btn btn--secondary btn--block";
-  btn.textContent = "空行をまとめて削除";
-  btn.addEventListener("click", () => {
-    const paragraphs = Array.from(el.editorBody.children).filter((n) => n.tagName === "P");
-    const emptyParagraphs = paragraphs.filter((p) => p.textContent.trim() === "");
-    if (emptyParagraphs.length === 0) {
-      showToast("削除できる空行はありませんでした。");
-      return;
-    }
-    pushUndoSnapshot();
-    emptyParagraphs.forEach((p) => p.remove());
-    scheduleAutoRender();
-    showToast(`空行を${emptyParagraphs.length}件削除しました。`);
-  });
-  container.appendChild(btn);
+/* ============================================================
+ * 空行の一括削除(5章UI要望、2026-07-24)
+ * 段落単位の空<p>のみを対象とし、見出しや本文が入っている段落は
+ * (テキストが残るため)誤って消えないようにする。
+ * サイドバーが長くなりすぎたためリボンへ移した(2026-07-27、Mikoto要望)。
+ * ========================================================== */
 
-  // 検索(2026-07-27、Mikoto要望により置換機能から分離)。置換を伴わず、
-  // 本文中の一致箇所数を確認したり、最初の一致箇所にジャンプしたいだけの
-  // ケース向け。
-  const searchTitle = document.createElement("p");
-  searchTitle.className = "edit-tools__subtitle";
-  searchTitle.textContent = "検索";
-  container.appendChild(searchTitle);
+el.btnRemoveEmptyLines.addEventListener("click", () => {
+  const paragraphs = Array.from(el.editorBody.children).filter((n) => n.tagName === "P");
+  const emptyParagraphs = paragraphs.filter((p) => p.textContent.trim() === "");
+  if (emptyParagraphs.length === 0) {
+    showToast("削除できる空行はありませんでした。");
+    return;
+  }
+  pushUndoSnapshot();
+  emptyParagraphs.forEach((p) => p.remove());
+  scheduleAutoRender();
+  showToast(`空行を${emptyParagraphs.length}件削除しました。`);
+});
 
-  const searchOnlyField = document.createElement("div");
-  searchOnlyField.className = "npc-edit-form__field";
-  const searchOnlyLabel = document.createElement("label");
-  searchOnlyLabel.className = "npc-edit-form__label";
-  searchOnlyLabel.textContent = "検索する文字列";
-  const searchOnlyInput = document.createElement("input");
-  searchOnlyInput.type = "text";
-  searchOnlyInput.className = "npc-edit-form__input";
-  searchOnlyInput.placeholder = "例: KPC";
-  searchOnlyField.appendChild(searchOnlyLabel);
-  searchOnlyField.appendChild(searchOnlyInput);
-  container.appendChild(searchOnlyField);
+/* ============================================================
+ * 検索・一括置換バー(5.16)
+ * リボンの🔍で開閉する。検索と一括置換はボタンを分けたまま扱う
+ * (2026-07-27、Mikoto要望により統合しない)。
+ * ========================================================== */
 
-  const searchBtn = document.createElement("button");
-  searchBtn.type = "button";
-  searchBtn.className = "btn btn--secondary btn--block";
-  searchBtn.textContent = "検索する";
-  searchBtn.addEventListener("click", () => {
-    const searchTerm = searchOnlyInput.value;
-    if (!searchTerm) {
-      showToast("検索する文字列を入力してください。", true);
-      return;
-    }
-    const { count, firstRange } = findInEditor(searchTerm);
-    if (count === 0) {
-      showToast(`「${searchTerm}」は見つかりませんでした。`);
-      return;
-    }
-    el.editorBody.focus({ preventScroll: true });
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(firstRange);
-    const target = firstRange.startContainer.nodeType === 3
-      ? firstRange.startContainer.parentElement
-      : firstRange.startContainer;
-    target.scrollIntoView({ behavior: "smooth", block: "center" });
-    showToast(`「${searchTerm}」が${count}件見つかりました(先頭の一致箇所を選択しました)。`);
-  });
-  container.appendChild(searchBtn);
-
-  // 一括置換(2026-07-24、Mikoto要望)。例: 本文中の「KPC」を一括で「{KPC}」に置換したい、など。
-  // 2026-07-27、Mikoto要望により検索(上記)とは別の入力欄・別のボタンに分離した。
-  const frTitle = document.createElement("p");
-  frTitle.className = "edit-tools__subtitle";
-  frTitle.textContent = "一括置換";
-  container.appendChild(frTitle);
-
-  const searchField = document.createElement("div");
-  searchField.className = "npc-edit-form__field";
-  const searchLabel = document.createElement("label");
-  searchLabel.className = "npc-edit-form__label";
-  searchLabel.textContent = "検索する文字列";
-  const searchInput = document.createElement("input");
-  searchInput.type = "text";
-  searchInput.className = "npc-edit-form__input";
-  searchInput.placeholder = "例: KPC";
-  searchField.appendChild(searchLabel);
-  searchField.appendChild(searchInput);
-  container.appendChild(searchField);
-
-  const replaceField = document.createElement("div");
-  replaceField.className = "npc-edit-form__field";
-  const replaceLabel = document.createElement("label");
-  replaceLabel.className = "npc-edit-form__label";
-  replaceLabel.textContent = "置換後の文字列";
-  const replaceInput = document.createElement("input");
-  replaceInput.type = "text";
-  replaceInput.className = "npc-edit-form__input";
-  replaceInput.placeholder = "例: {KPC}";
-  replaceField.appendChild(replaceLabel);
-  replaceField.appendChild(replaceInput);
-  container.appendChild(replaceField);
-
-  const replaceBtn = document.createElement("button");
-  replaceBtn.type = "button";
-  replaceBtn.className = "btn btn--secondary btn--block";
-  replaceBtn.textContent = "一括置換する";
-  replaceBtn.addEventListener("click", () => {
-    const searchTerm = searchInput.value;
-    const replaceTerm = replaceInput.value;
-    if (!searchTerm) {
-      showToast("検索する文字列を入力してください。", true);
-      return;
-    }
-    pushUndoSnapshot();
-    const count = findAndReplaceInEditor(searchTerm, replaceTerm);
-    if (count === 0) {
-      undoStack.pop();
-      updateUndoButton();
-      showToast("一致する文字列が見つかりませんでした。");
-      return;
-    }
-    scheduleAutoRender();
-    showToast(`「${searchTerm}」を${count}件、「${replaceTerm}」に置換しました。`);
-  });
-  container.appendChild(replaceBtn);
+function updateFindBarStatus() {
+  if (searchHits.length === 0) {
+    el.findStatus.textContent = lastSearchFoundNone ? "一致する箇所はありません。" : "";
+  } else {
+    el.findStatus.textContent = `「${lastSearchTerm}」${searchHits.length}件中 ${searchHitIndex + 1}件目`;
+  }
+  el.btnFindPrev.disabled = searchHits.length === 0;
+  el.btnFindNext.disabled = searchHits.length === 0;
 }
+
+function setFindBarOpen(open) {
+  el.findBar.hidden = !open;
+  el.btnFindToggle.classList.toggle("is-active", open);
+  if (open) {
+    el.findInput.value = lastSearchTerm;
+    updateFindBarStatus();
+    el.findInput.focus();
+    el.findInput.select();
+  } else {
+    clearSearchHighlights();
+  }
+}
+
+el.btnFindToggle.addEventListener("click", () => setFindBarOpen(el.findBar.hidden));
+el.btnFindClose.addEventListener("click", () => setFindBarOpen(false));
+
+function runFind() {
+  const searchTerm = el.findInput.value;
+  if (!searchTerm) {
+    showToast("検索する文字列を入力してください。", true);
+    return;
+  }
+  const count = highlightAllMatches(searchTerm);
+  if (count === 0) {
+    updateFindBarStatus();
+    showToast(`「${searchTerm}」は見つかりませんでした。`);
+    return;
+  }
+  focusSearchHit(0);
+  updateFindBarStatus();
+  showToast(`「${searchTerm}」が${count}件見つかりました。`);
+}
+
+el.btnFindRun.addEventListener("click", runFind);
+
+// 入力欄でEnter(iOSのソフトキーボードの「検索」「改行」含む)でも検索できるようにする。
+el.findInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    runFind();
+  }
+});
+
+el.btnFindNext.addEventListener("click", () => {
+  if (searchHits.length === 0) return;
+  focusSearchHit(searchHitIndex + 1);
+  updateFindBarStatus();
+});
+
+el.btnFindPrev.addEventListener("click", () => {
+  if (searchHits.length === 0) return;
+  focusSearchHit(searchHitIndex - 1);
+  updateFindBarStatus();
+});
+
+// 一括置換(2026-07-24、Mikoto要望)。例: 本文中の「KPC」を一括で「{KPC}」に置換したい、など。
+// 検索欄の文字列をそのまま使うため、検索した後に置換したくなっても入力し直す必要がない
+// (2026-07-27、Mikoto要望)。ボタンは検索とは別のまま。
+el.btnReplaceAll.addEventListener("click", () => {
+  const searchTerm = el.findInput.value;
+  const replaceTerm = el.replaceInput.value;
+  if (!searchTerm) {
+    showToast("検索する文字列を入力してください。", true);
+    return;
+  }
+  // 検索マークが残っているとテキストノードが分割され、置換の一致判定が崩れるため
+  // 先に解除する(2026-07-27)。
+  clearSearchHighlights();
+  pushUndoSnapshot();
+  const count = findAndReplaceInEditor(searchTerm, replaceTerm);
+  if (count === 0) {
+    undoStack.pop();
+    updateUndoButton();
+    updateFindBarStatus();
+    showToast("一致する文字列が見つかりませんでした。");
+    return;
+  }
+  lastSearchFoundNone = false;
+  updateFindBarStatus();
+  scheduleAutoRender();
+  showToast(`「${searchTerm}」を${count}件、「${replaceTerm}」に置換しました。`);
+});
 
 function escapeRegExp(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// 検索のみ(置換なし)。本文中のテキストノードを走査し、一致件数と最初の
-// 一致箇所のRangeを返す(2026-07-27、Mikoto要望により一括置換から分離)。
-function findInEditor(searchTerm) {
+/* ============================================================
+ * 検索マーク(5.16)
+ * 一致箇所をすべて<span class="search-hit">で囲んで色づけし、「次の一致箇所へ」で
+ * 順番に巡回できるようにする(2026-07-27、Mikoto要望。当初は先頭1件を選択するだけだった)。
+ *
+ * このマークはあくまで一時的な表示用で、本文データの一部ではない。そのため、
+ * 本文を読み書きする操作(プレビュー描画・書き出し・元に戻す・一括置換・本文の直接編集など)の
+ * 前には必ずclearSearchHighlights()で取り除き、書き出したファイルやUndo履歴に
+ * 混入しないようにしている。
+ * ========================================================== */
+
+let searchHits = [];
+let searchHitIndex = 0;
+let lastSearchTerm = "";
+// 直前の検索が「0件」だったかどうか。本文を編集してマークが外れただけの状態と、
+// 検索した結果1件も無かった状態を、メニューの表示で区別するために持っている。
+let lastSearchFoundNone = false;
+
+function clearSearchHighlights() {
+  const marks = Array.from(el.editorBody.querySelectorAll(".search-hit"));
+  marks.forEach((mark) => {
+    const parent = mark.parentNode;
+    if (!parent) return;
+    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+    mark.remove();
+    // 分割されたテキストノードを結合し直し、次回の検索・置換が正しく一致するようにする。
+    parent.normalize();
+  });
+  searchHits = [];
+  searchHitIndex = 0;
+  lastSearchFoundNone = false;
+  updateFindBarStatus();
+}
+
+// 一致箇所をすべて<span class="search-hit">で包み、その件数を返す。
+function highlightAllMatches(searchTerm) {
+  clearSearchHighlights();
+  lastSearchTerm = searchTerm;
+  if (!searchTerm) return 0;
+
   const walker = document.createTreeWalker(el.editorBody, NodeFilter.SHOW_TEXT, null);
-  const re = new RegExp(escapeRegExp(searchTerm), "g");
-  let count = 0;
-  let firstRange = null;
+  const textNodes = [];
   let node;
-  while ((node = walker.nextNode())) {
+  while ((node = walker.nextNode())) textNodes.push(node);
+
+  const re = new RegExp(escapeRegExp(searchTerm), "g");
+  textNodes.forEach((tn) => {
+    // 検索マーク自身の中身を二重に包まないようにする。
+    if (tn.parentElement && tn.parentElement.classList.contains("search-hit")) return;
+    const value = tn.nodeValue;
     re.lastIndex = 0;
+    const ranges = [];
     let match;
-    while ((match = re.exec(node.nodeValue))) {
-      count++;
-      if (!firstRange) {
-        firstRange = document.createRange();
-        firstRange.setStart(node, match.index);
-        firstRange.setEnd(node, match.index + match[0].length);
-      }
+    while ((match = re.exec(value))) {
+      ranges.push({ start: match.index, end: match.index + match[0].length });
     }
-  }
-  return { count, firstRange };
+    if (ranges.length === 0) return;
+
+    // 1つのテキストノード内の複数一致に対応するため、後ろから切り出していく。
+    const frag = document.createDocumentFragment();
+    let cursor = 0;
+    ranges.forEach((r) => {
+      if (r.start > cursor) frag.appendChild(document.createTextNode(value.slice(cursor, r.start)));
+      const mark = document.createElement("span");
+      mark.className = "search-hit";
+      mark.textContent = value.slice(r.start, r.end);
+      frag.appendChild(mark);
+      cursor = r.end;
+    });
+    if (cursor < value.length) frag.appendChild(document.createTextNode(value.slice(cursor)));
+    tn.parentNode.replaceChild(frag, tn);
+  });
+
+  searchHits = Array.from(el.editorBody.querySelectorAll(".search-hit"));
+  searchHitIndex = 0;
+  lastSearchFoundNone = searchHits.length === 0;
+  return searchHits.length;
+}
+
+// 指定した順番の一致箇所へスクロールし、そこだけ強調表示にする。
+function focusSearchHit(index) {
+  if (searchHits.length === 0) return;
+  searchHitIndex = ((index % searchHits.length) + searchHits.length) % searchHits.length;
+  searchHits.forEach((hit, i) => {
+    hit.classList.toggle("search-hit--current", i === searchHitIndex);
+  });
+  searchHits[searchHitIndex].scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 // 本文中のテキストノードを走査し、単純な文字列一致で一括置換する。
@@ -671,10 +826,25 @@ function updateRibbonActionButtons() {
 
 function updateRibbonVisibility() {
   el.miniToolbar.hidden = state.mode !== "edit";
+  // 検索・置換は編集モード専用のため、プレビューに切り替えたら閉じる(2026-07-27)。
+  if (state.mode !== "edit" && !el.findBar.hidden) setFindBarOpen(false);
   savedRange = null;
   updateRibbonActionButtons();
   updateUndoButton();
 }
+
+// 本文に触り始めた時点で検索マークを外す(2026-07-27)。
+//
+// マーク解除はDOM(テキストノードの分割)を書き換えるため、選択が確定した後に行うと
+// 控えておいた選択範囲(savedRange)が無効になってしまう。そこで、選択が始まる前の
+// mousedown/touchstart/keydownの時点で外し、以降の選択・編集は必ずマークのない
+// きれいな本文に対して行われるようにしている。
+// (サイドバーの「検索する」「次の一致箇所へ」は本文外の操作なので、これらでは消えない)
+["mousedown", "touchstart", "keydown"].forEach((type) => {
+  el.editorBody.addEventListener(type, () => {
+    if (searchHits.length > 0) clearSearchHighlights();
+  });
+});
 
 el.miniToolbar.querySelectorAll("button[data-action]").forEach((btn) => {
   btn.addEventListener("mousedown", (e) => {
@@ -697,6 +867,8 @@ const UNDO_STACK_LIMIT = 20;
 let undoStack = [];
 
 function pushUndoSnapshot() {
+  // 検索マークは表示用の一時的なものなので、履歴に混入させない(2026-07-27)。
+  clearSearchHighlights();
   undoStack.push({
     html: el.editorBody.innerHTML,
     npcs: JSON.parse(JSON.stringify(state.npcs)),
@@ -717,12 +889,15 @@ function performUndo() {
   }
   el.editorBody.innerHTML = snapshot.html;
   state.npcs = snapshot.npcs;
+  searchHits = [];
+  searchHitIndex = 0;
   window.getSelection().removeAllRanges();
   savedRange = null;
   updateRibbonActionButtons();
   updateUndoButton();
   syncAllHeadingIndents();
   scheduleAutoRender();
+  renderSidebarBody();
   showToast("元に戻しました。");
 }
 
@@ -1476,9 +1651,6 @@ function extractSkillLines(lines, commandPrefix) {
   });
   const targetLines = markerIndex >= 0 ? lines.slice(markerIndex + 1) : lines;
 
-  // 名詞+パーセンテージの基準形。区切りは全角/半角コロン・スペースのいずれでも(組み合わせ・
-  // 繰り返しでも)よく、区切りなし(「回避32％」)も許容する(2026-07-25、Mikoto要望)。
-  const percentLineRegex = /^(.+?)[：:\s]*([0-9０-９]+)％(?:\s+(\S.*))?$/;
   const angleLineRegex = /^[＜<](.+?)[＞>]\s*([0-9０-９]+)(?:\s+(.*))?$/;
   const skills = [];
 
@@ -1497,18 +1669,62 @@ function extractSkillLines(lines, commandPrefix) {
       skills.push({ command: firstToken, label });
       return;
     }
-    let m = line.match(percentLineRegex);
-    if (m) {
-      pushSynthesized(m[1], m[2], m[3]);
+    const percentSkills = extractPercentSkillsFromLine(line);
+    if (percentSkills.length > 0) {
+      percentSkills.forEach((s) => pushSynthesized(s.name, s.percentage, s.trailing));
       return;
     }
-    m = line.match(angleLineRegex);
+    const m = line.match(angleLineRegex);
     if (m) {
       pushSynthesized(m[1], m[2], m[3]);
       return;
     }
   });
   return skills;
+}
+
+// 「名詞＋パーセンテージ」表記を1行の中から拾い出す(2026-07-25にMikotoと確認した基準形)。
+//
+// 当初は行全体に完全一致させる正規表現(/^(.+?)[：:\s]*([0-9０-９]+)％(?:\s+(\S.*))?$/)を
+// 使っていたが、基準形どおりに書いていても認識されないケースがあるとの報告(2026-07-27、
+// Mikoto)を受けて調査したところ、以下の4点が原因と判明したため、行全体への一致をやめ、
+// 「数値＋％」のトークンを行内から走査して拾う方式に変更した。
+//   1. 半角の「%」がまったく認識されなかった(全角の「％」しか許容していなかった)。
+//      PDF・TXTのシナリオでは半角「%」も普通に使われるため、これが主因。
+//   2. 数値と％の間に空白があると認識されなかった(例:「回避 32 ％」)。
+//   3. ％の直後に空白なしで文字が続くと行全体が不一致になった(例:「回避 32％。」のように
+//      句読点や閉じ括弧が付いている場合)。
+//   4. 1行に複数の技能が並んでいると先頭の1件しか拾えなかった(例:「目星 25％ 聞き耳 30％」)。
+//      PDFからの抽出で複数行が1行にまとまってしまう場合に該当する。
+//
+// 技能名は「直前の技能(または行頭)からその数値までの間のテキスト」とし、区切り文字を除去した
+// ものを採用する。技能名自体に数字は含まれない前提で、名前の中に数字が残る場合(例:「STR 10
+// 幸運 50%」のように同じ行に別のステータスが並んでいる場合)は、最後の数字より後ろだけを
+// 技能名として扱う。
+function extractPercentSkillsFromLine(line) {
+  const tokenRegex = /([0-9０-９]+)\s*[%％]/g;
+  const matches = [];
+  let m;
+  while ((m = tokenRegex.exec(line))) {
+    matches.push({ percentage: m[1], start: m.index, end: tokenRegex.lastIndex });
+  }
+
+  const results = [];
+  matches.forEach((match, i) => {
+    const prevEnd = i === 0 ? 0 : matches[i - 1].end;
+    let name = line.slice(prevEnd, match.start);
+    // 名前の中に数字が残っている場合は、直前に別のステータス表記が並んでいるとみなし、
+    // 最後の数字より後ろだけを技能名として扱う。
+    const lastDigit = name.search(/[0-9０-９](?![\s\S]*[0-9０-９])/);
+    if (lastDigit >= 0) name = name.slice(lastDigit + 1);
+    // 区切り(コロン・スペース)や、前の技能から続く句読点・記号を落とす。
+    name = name.replace(/^[\s、,。・／\/|｜]+/, "").replace(/[：:\s]+$/, "").trim();
+    if (!name) return;
+    // ダメージ表記(1d3+1D4など)を探す範囲は、この技能の直後から次の技能の手前まで。
+    const trailing = line.slice(match.end, i + 1 < matches.length ? matches[i + 1].start : line.length);
+    results.push({ name, percentage: match.percentage, trailing });
+  });
+  return results;
 }
 
 // 選択範囲の生テキストからNPCカードを組み立てる。抽出結果に関わらず、選択範囲の全文を
@@ -1988,6 +2204,8 @@ function buildToggleTree(rootEl) {
 
 function renderPreview() {
   el.previewContent.innerHTML = "";
+  // 検索マークはプレビュー・書き出しには持ち込まない(2026-07-27)。
+  clearSearchHighlights();
   const clone = el.editorBody.cloneNode(true);
   el.previewContent.appendChild(buildToggleTree(clone));
   renderTocList(el.tocListInline);
@@ -2010,6 +2228,7 @@ function scheduleAutoRender() {
 function buildStandaloneHtml() {
   const savedAt = new Date().toISOString();
   state.meta.savedAt = savedAt;
+  clearSearchHighlights();
 
   const bodyClone = el.editorBody.cloneNode(true);
   // コピペボタンの対象テキストを data-copy-text に埋め込み、
@@ -2377,6 +2596,7 @@ function renderMarkdownNode(node) {
 }
 
 function buildMarkdownExport() {
+  clearSearchHighlights();
   const clone = el.editorBody.cloneNode(true);
   const tree = buildSectionTree(clone);
   return renderMarkdownNode(tree).trim() + "\n";
@@ -2410,6 +2630,7 @@ function renderTxtNode(node) {
 }
 
 function buildTxtExport() {
+  clearSearchHighlights();
   const clone = el.editorBody.cloneNode(true);
   const tree = buildSectionTree(clone);
   return renderTxtNode(tree).trim() + "\n";

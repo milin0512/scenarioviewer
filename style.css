@@ -33,6 +33,10 @@
   --toolbar-btn-bg: #f3f3f3;
   --toolbar-btn-text: #222222;
   --toolbar-sep: rgba(0, 0, 0, 0.15);
+  /* 検索の一致箇所(5.16)。ブランドカラーのオレンジは見出し等で使っているため、
+     検索マークは黄色系にして区別できるようにしている(2026-07-27)。 */
+  --search-hit-bg: #ffe97a;
+  --search-hit-current-bg: #ffd21e;
 }
 
 /* ダークモード対応(OSのカラースキーム設定に追従、2026-07-24) */
@@ -60,6 +64,9 @@
     --toolbar-btn-bg: #37474f;
     --toolbar-btn-text: #ffffff;
     --toolbar-sep: rgba(255, 255, 255, 0.2);
+    /* ダークモードでも黄色の下地は保ち、文字色は.search-hit側で濃色に固定する */
+    --search-hit-bg: #c8a415;
+    --search-hit-current-bg: #ffd21e;
   }
 }
 
@@ -282,6 +289,9 @@ body.mode-preview .app-header__menu-btn {
 .btn--secondary { background: var(--btn-secondary-bg); color: #fff; }
 .btn--danger { background: var(--danger); color: #fff; }
 .btn--block { display: block; width: 100%; }
+/* 縦に並ぶボタン同士がくっついて1つのボタンに見えてしまうため間隔をあける
+   (2026-07-27、Mikoto報告。検索/次の一致箇所へ、追加読み込み/読み込み直しなど) */
+.btn--block + .btn--block { margin-top: 8px; }
 .btn--small { padding: 6px 10px; min-height: 36px; font-size: 0.85rem; }
 .btn:active { opacity: 0.75; }
 
@@ -412,6 +422,9 @@ body.mode-preview .app-header__menu-btn {
 
 .mini-toolbar button:active { background: var(--accent); color: #fff; }
 
+/* 検索バーを開いている間は🔍ボタンを押下状態として見せる(2026-07-27) */
+.mini-toolbar button.is-active { background: var(--accent); color: #fff; }
+
 .mini-toolbar button:disabled {
   opacity: 0.4;
 }
@@ -422,6 +435,60 @@ body.mode-preview .app-header__menu-btn {
   align-self: stretch;
   margin: 4px 2px;
   background: var(--toolbar-sep);
+}
+
+/* ============ 検索・一括置換バー(5.16) ============ */
+/* サイドバーが長くなりすぎたため、旧「編集ツール」の検索・置換をここへ移した
+   (2026-07-27、Mikoto要望)。リボンと同じ配色で、ヘッダー直下に固定表示する。 */
+
+.find-bar {
+  background: var(--toolbar-bg);
+  padding: 6px 8px 8px;
+  border-top: 1px solid var(--toolbar-sep);
+}
+
+.find-bar__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.find-bar__row + .find-bar__row { margin-top: 6px; }
+
+.find-bar__input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px;
+  font-size: 16px; /* iOSで入力時に自動ズームされないよう16px以上にする */
+  border-radius: 6px;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--text);
+}
+
+.find-bar__btn {
+  flex: 0 0 auto;
+  border: none;
+  border-radius: 6px;
+  min-height: 38px;
+  padding: 0 10px;
+  font-size: 0.9rem;
+  background: var(--toolbar-btn-bg);
+  color: var(--toolbar-btn-text);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.find-bar__btn:active { background: var(--accent); color: #fff; }
+.find-bar__btn:disabled { opacity: 0.4; }
+.find-bar__btn--close { padding: 0 8px; font-size: 1.1rem; }
+
+.find-bar__status {
+  margin: 6px 0 0;
+  font-size: 0.75rem;
+  color: var(--toolbar-btn-text);
+  opacity: 0.75;
+  min-height: 1em;
 }
 
 /* ============ アウトラインビュー ============ */
@@ -523,12 +590,27 @@ body.mode-preview .app-header__menu-btn {
 
 /* ============ 編集ツール(空行削除・検索置換、ハンバーガーメニュー内) ============ */
 
-.edit-tools__subtitle {
-  font-size: 0.8rem;
-  color: var(--text-muted);
-  margin: 14px 0 8px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--border);
+/* 現在のファイル名など、メニュー内の補足テキスト */
+.edit-tools__note {
+  font-size: 0.78rem;
+  color: var(--text-faint);
+  margin: 6px 0 8px;
+  word-break: break-all;
+}
+
+/* 検索した文字列の一致箇所(5.16)。本文データではなく一時的な表示用のマークで、
+   プレビュー・書き出し・元に戻す履歴には含めない(2026-07-27、Mikoto要望)。 */
+.search-hit {
+  background: var(--search-hit-bg);
+  /* 下地が黄色系のため、ダーク/ライトどちらでも文字は濃色で固定する */
+  color: #1c1c1e;
+  border-radius: 2px;
+}
+
+/* 「次の一致箇所へ」で今いる箇所だけは、他の一致箇所と区別できるよう強調する */
+.search-hit--current {
+  background: var(--search-hit-current-bg);
+  outline: 2px solid var(--accent);
 }
 
 .npc-row {
