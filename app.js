@@ -1068,6 +1068,53 @@ function findAncestorMark(node, matchFn) {
   return null;
 }
 
+// 解除対象のマークを探す。基本は上記の「祖先を辿る」判定だが、それだけでは
+// トリプルクリック等で段落全体を選んだ場合に解除できなかった(2026-07-27、修正)。
+// このとき選択範囲の境界は<p>自身になり、マークは<p>の「子孫」にあるため、
+// 祖先を辿るだけでは見つからず、解除されずに同じマークが二重に入れ子で
+// 作られてしまっていた(見出しの二重登録・装飾の二重適用の原因)。
+//
+// そこで、祖先に見つからない場合に限り「選択範囲がマーク要素をまるごと
+// 覆っているか」も判定する。部分的に重なっているだけの選択(装飾の途中から
+// 外にはみ出した選択など)では解除しないよう、完全に覆っている場合だけ対象とする。
+function findMarkToToggle(range, lookupNode, matchFn) {
+  const ancestor = findAncestorMark(lookupNode, matchFn);
+  if (ancestor) return ancestor;
+
+  const container = range.commonAncestorContainer;
+  if (container.nodeType !== 1) return null;
+
+  const covered = Array.from(container.children).filter((child) => {
+    if (!matchFn(child)) return false;
+    const childRange = document.createRange();
+    childRange.selectNodeContents(child);
+    const startsAtOrBefore = range.compareBoundaryPoints(Range.START_TO_START, childRange) <= 0;
+    const endsAtOrAfter = range.compareBoundaryPoints(Range.END_TO_END, childRange) >= 0;
+    return startsAtOrBefore && endsAtOrAfter;
+  });
+  return covered.length === 1 ? covered[0] : null;
+}
+
+// 見出しの「ラベル文字」を取り出す。見出しにした段落にコピペボタンが設置されていると、
+// 素のtextContentにはボタンのラベル(「📋コピー」)まで含まれてしまい、アウトライン・
+// 目次・書き出しの見出し名に混入していた(2026-07-27、修正)。さらにアウトラインの
+// 名前欄はその文字列を初期値にしていたため、名前を編集しなくてもフォーカスを外すだけで
+// ボタンが「📋コピー」という文字に化けて壊れていた。
+function headingLabelText(markEl) {
+  if (!markEl) return "";
+  const clone = markEl.cloneNode(true);
+  clone.querySelectorAll(".cp-btn").forEach((btn) => btn.remove());
+  return (clone.textContent || "").trim();
+}
+
+// 見出しのラベル文字だけを書き換える(コピペボタンは壊さずに残す)。
+// ボタンはコピー範囲(.cp-target)の外側にあるため、ラベルの実体である
+// .cp-target(なければ見出しマーク自身)のテキストだけを差し替える。
+function setHeadingLabelText(markEl, text) {
+  const container = markEl.querySelector(".cp-target") || markEl;
+  container.textContent = text;
+}
+
 // マーク要素を、その中身(子ノード)だけ残して取り除く(見出し解除・装飾解除・
 // コピペボタン解除で共通に使う)。
 function unwrapMarkElement(markEl) {
@@ -1093,7 +1140,7 @@ function applyMarkToSelection(type) {
 
   try {
     if (type === "heading") {
-      const existing = findAncestorMark(range.commonAncestorContainer, (n) => n.classList && n.classList.contains("h-mark"));
+      const existing = findMarkToToggle(range, range.commonAncestorContainer, (n) => n.classList && n.classList.contains("h-mark"));
       pushUndoSnapshot();
       if (existing) {
         unwrapMarkElement(existing);
@@ -1105,7 +1152,7 @@ function applyMarkToSelection(type) {
       // 複数段落にまたがる範囲の場合、段落ごとに個別の.cp-wrapが作られるため
       // (applyCopyButtonMark参照)、判定はcommonAncestorContainerではなく
       // 範囲の開始位置(startContainer)から見る(2026-07-25、Mikoto報告・修正)。
-      const existing = findAncestorMark(range.startContainer, (n) => n.classList && n.classList.contains("cp-wrap"));
+      const existing = findMarkToToggle(range, range.startContainer, (n) => n.classList && n.classList.contains("cp-wrap"));
       pushUndoSnapshot();
       if (existing) {
         removeCopyButtonMark(existing);
@@ -1119,7 +1166,7 @@ function applyMarkToSelection(type) {
       openLinkPicker(range);
     } else {
       const tagName = DECORATION_TAGS[type];
-      const existing = findAncestorMark(range.commonAncestorContainer, (n) => n.tagName === tagName);
+      const existing = findMarkToToggle(range, range.commonAncestorContainer, (n) => n.tagName === tagName);
       pushUndoSnapshot();
       if (existing) {
         unwrapMarkElement(existing);
@@ -1384,7 +1431,7 @@ function renderLinkPickerBody() {
       btn.className = "link-picker__item";
       const level = parseInt(markEl.dataset.level || "1", 10);
       btn.style.paddingLeft = 8 + (level - 1) * 14 + "px";
-      btn.textContent = markEl.textContent;
+      btn.textContent = headingLabelText(markEl);
       btn.addEventListener("click", () => {
         applyLinkMark(pendingLinkRange, "heading", markEl.dataset.hid);
         closeLinkPicker();
@@ -1606,10 +1653,10 @@ function renderOutlineView(container) {
     const textInput = document.createElement("input");
     textInput.type = "text";
     textInput.className = "outline-item__text";
-    textInput.value = markEl.textContent;
+    textInput.value = headingLabelText(markEl);
     textInput.addEventListener("change", () => {
       pushUndoSnapshot();
-      markEl.textContent = textInput.value;
+      setHeadingLabelText(markEl, textInput.value);
       scheduleAutoRender();
     });
     row.appendChild(textInput);
@@ -2126,7 +2173,7 @@ function renderTocList(container) {
     a.href = "#" + markEl.dataset.hid;
     const level = parseInt(markEl.dataset.level || "1", 10);
     a.style.paddingLeft = (level - 1) * 14 + "px";
-    a.textContent = markEl.textContent;
+    a.textContent = headingLabelText(markEl);
     a.addEventListener("click", (e) => {
       e.preventDefault();
       jumpToHeading(markEl.dataset.hid);
@@ -2396,7 +2443,7 @@ function buildStandaloneHtml() {
       // 以前はonclick属性にhidを生で埋めており、細工したhidでJSを注入できてしまっていた
       // (2026-07-27のセキュリティ点検で確認)。属性値としてエスケープして持たせ、
       // クリック処理は書き出し先のJS側でイベント委譲する方式に変更した。
-      return `<a href="#${escapeHtml(m.dataset.hid)}" class="toc-link" data-hid="${escapeHtml(m.dataset.hid)}" style="padding-left:${(level - 1) * 14}px">${escapeHtml(m.textContent)}</a>`;
+      return `<a href="#${escapeHtml(m.dataset.hid)}" class="toc-link" data-hid="${escapeHtml(m.dataset.hid)}" style="padding-left:${(level - 1) * 14}px">${escapeHtml(headingLabelText(m))}</a>`;
     })
     .join("\n");
 
@@ -2655,7 +2702,7 @@ document.addEventListener('click', function (e) {
 
 function getHeadingTextByHid(hid) {
   const mark = getHeadingMarks().find((m) => m.dataset.hid === hid);
-  return mark ? mark.textContent : "";
+  return headingLabelText(mark);
 }
 
 // 見出しへの内部リンク(5.13)をMarkdownのアンカーリンク`[text](#slug)`に変換するための
@@ -2788,7 +2835,7 @@ function renderTxtNode(node) {
   let out = "";
   if (node.heading) {
     const indent = "  ".repeat(Math.max(node.level - 1, 0));
-    out += indent + (node.heading.textContent || "").trim() + "\n";
+    out += indent + headingLabelText(node.heading) + "\n";
   }
   const bodyText = node.bodyNodes
     .filter((n) => n.nodeType === 1 && n.tagName === "P")
