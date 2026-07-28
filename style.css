@@ -281,6 +281,9 @@ body.mode-preview .app-header__menu-btn {
   text-align: center;
   cursor: pointer;
   touch-action: manipulation;
+  /* ボタン内で折り返すと2行になって読みづらいため1行に固定する
+     (2026-07-27、Mikoto要望)。ラベル側も1行に収まる長さにしてある。 */
+  white-space: nowrap;
 }
 
 /* ヘッダーと同じブランドカラーに揃える(2026-07-25、Mikoto要望)。--header-bgは

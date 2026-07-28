@@ -226,7 +226,14 @@ async function extractPdfText(file) {
   if (!window.pdfjsLib) throw new Error("pdf.jsの読み込みに失敗しています。");
   const pdfjsLib = window.pdfjsLib;
   const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  // isEvalSupported:false は CVE-2024-4367(pdf.js 4.2.67未満で、細工したPDFのFontMatrix
+  // 経由で任意のJavaScriptが実行される問題)に対する公式の回避策。同梱しているpdf.jsは
+  // 3.11.174で影響範囲に入るため明示的に無効化する(2026-07-27のセキュリティ点検)。
+  // 本ツールはテキスト抽出しか行わず描画しないため、無効化による実害はない。
+  const pdf = await pdfjsLib.getDocument({
+    data: arrayBuffer,
+    isEvalSupported: false,
+  }).promise;
 
   const pageTexts = [];
   for (let i = 1; i <= pdf.numPages; i++) {
@@ -405,11 +412,133 @@ function parseToolExportedHtml(htmlString) {
   if (!scriptEl) {
     throw new Error("本ツールで書き出した編集用データを含んでいないHTMLです");
   }
+  let data;
   try {
-    return JSON.parse(scriptEl.textContent);
+    data = JSON.parse(scriptEl.textContent);
   } catch (e) {
     throw new Error("編集データの解析に失敗しました");
   }
+  // 読み込んだHTMLは第三者が作った可能性のある外部データとして扱い、必ず洗浄する
+  // (2026-07-27のセキュリティ点検で、細工したHTMLを読み込ませると本文中の
+  // イベントハンドラ属性(<img onerror=...>など)が実行できてしまうことを確認したため)。
+  data.bodyHtml = sanitizeLoadedBodyHtml(data.bodyHtml || "");
+  data.npcs = sanitizeLoadedNpcs(data.npcs);
+  return data;
+}
+
+/* ============================================================
+ * 読み込んだHTMLの洗浄(2026-07-27、セキュリティ点検にもとづく対策)
+ *
+ * 本文は innerHTML で流し込むため、外部ファイル由来のHTMLをそのまま入れると
+ * イベントハンドラ属性による任意コード実行(XSS)が成立してしまう。さらに、
+ * 汚染された本文はそのまま書き出しファイルにも引き継がれ、卓のメンバーへ配布した
+ * 先でも実行されうる。そこで、本ツールが実際に生成しうるタグ・属性だけを許可する
+ * ホワイトリスト方式で洗浄する(許可外は削除。未知のタグは中身のテキストを残して
+ * タグだけ剥がすので、シナリオ本文が失われることはない)。
+ * ========================================================== */
+
+// 本ツールが本文中に生成するタグ(5.4・5.6・5.12・5.13で使うもの)
+const ALLOWED_BODY_TAGS = new Set([
+  "P", "DIV", "BR", "SPAN", "STRONG", "EM", "B", "I", "U", "A", "BUTTON",
+]);
+
+// 中身ごと捨てるタグ(テキストとして残すとかえって不自然・危険なもの)
+const DROPPED_BODY_TAGS = new Set([
+  "SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED", "LINK", "META", "BASE",
+  "FORM", "INPUT", "TEXTAREA", "SELECT", "OPTION", "IMG", "SVG", "MATH",
+  "VIDEO", "AUDIO", "SOURCE", "TRACK", "CANVAS", "TEMPLATE", "NOSCRIPT",
+]);
+
+// 本ツールが使う属性(これ以外はon*属性含めすべて削除する)
+const ALLOWED_BODY_ATTRS = new Set([
+  "class", "style", "type",
+  "data-hid", "data-level", "data-cpid", "data-link-type", "data-target", "data-copy-text",
+]);
+
+// data-hid / data-cpid などのIDは、後でセレクタや書き出しの属性値に埋め込まれるため、
+// 英数字・ハイフン・アンダースコアだけに正規化する(引用符などを混ぜられないようにする)。
+function safeIdValue(value, fallbackPrefix) {
+  const cleaned = String(value == null ? "" : value).replace(/[^A-Za-z0-9_-]/g, "");
+  return cleaned || uid(fallbackPrefix);
+}
+
+// styleは本ツール自身がmargin-left/margin-bottomを書き込むため属性ごとは消せない。
+// url()など外部参照を招く記法を含むものだけ落とす。
+function safeStyleValue(value) {
+  const v = String(value || "");
+  if (/url\s*\(|expression\s*\(|javascript:|@import|<|\\/i.test(v)) return "";
+  return v;
+}
+
+function sanitizeLoadedBodyHtml(htmlString) {
+  const doc = new DOMParser().parseFromString(
+    "<div id=\"__root\">" + String(htmlString || "") + "</div>",
+    "text/html"
+  );
+  const root = doc.getElementById("__root");
+  if (!root) return "";
+
+  // 子孫を書き換えながら走査するため、先に配列化してから処理する。
+  Array.from(root.querySelectorAll("*")).forEach((node) => {
+    if (!node.isConnected) return; // 親ごと削除済み
+
+    if (DROPPED_BODY_TAGS.has(node.tagName)) {
+      node.remove();
+      return;
+    }
+
+    if (!ALLOWED_BODY_TAGS.has(node.tagName)) {
+      // 未知のタグは中身(本文テキスト)だけ残してタグを剥がす。
+      const parent = node.parentNode;
+      if (!parent) return;
+      while (node.firstChild) parent.insertBefore(node.firstChild, node);
+      node.remove();
+      return;
+    }
+
+    Array.from(node.attributes).forEach((attr) => {
+      const name = attr.name.toLowerCase();
+      if (!ALLOWED_BODY_ATTRS.has(name)) {
+        // on*属性・src・formactionなどはここですべて落ちる。
+        node.removeAttribute(attr.name);
+        return;
+      }
+      if (name === "style") {
+        const safe = safeStyleValue(attr.value);
+        if (safe) node.setAttribute("style", safe);
+        else node.removeAttribute("style");
+      } else if (name === "data-hid") {
+        node.setAttribute("data-hid", safeIdValue(attr.value, "h"));
+      } else if (name === "data-cpid") {
+        node.setAttribute("data-cpid", safeIdValue(attr.value, "cp"));
+      } else if (name === "data-target") {
+        node.setAttribute("data-target", safeIdValue(attr.value, "t"));
+      } else if (name === "data-level") {
+        node.setAttribute("data-level", String(clampLevel(parseInt(attr.value, 10) || 1)));
+      }
+    });
+
+    // 内部リンクのhrefは同一ページ内アンカーだけに限定する(javascript:等を排除)。
+    if (node.tagName === "A") {
+      const target = node.getAttribute("data-target");
+      node.setAttribute("href", "#" + (target || ""));
+    }
+    // ボタンはtype="button"以外にしない(フォーム送信等を起こさせない)。
+    if (node.tagName === "BUTTON") node.setAttribute("type", "button");
+  });
+
+  return root.innerHTML;
+}
+
+// NPCカードのデータは表示時にテキストとして扱われるため中身の文字列は問題ないが、
+// idだけはセレクタ・属性値に埋め込まれるため正規化する。
+function sanitizeLoadedNpcs(npcs) {
+  if (!Array.isArray(npcs)) return [];
+  return npcs.map((npc) => {
+    const safe = Object.assign({}, npc);
+    safe.id = safeIdValue(npc && npc.id, "npc");
+    return safe;
+  });
 }
 
 function finishLoad(fileName, kindLabel) {
@@ -433,7 +562,9 @@ function escapeHtml(str) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    // シングルクォートも落とす(属性値を'...'で囲む箇所に備えた保険。2026-07-27)
+    .replace(/'/g, "&#39;");
 }
 
 /* ============================================================
@@ -515,7 +646,9 @@ function renderFileToolsView(container) {
   const appendBtn = document.createElement("button");
   appendBtn.type = "button";
   appendBtn.className = "btn btn--secondary btn--block";
-  appendBtn.textContent = "ファイルを追加で読み込む(末尾に追加)";
+  // ラベルはボタン内で折り返さない長さに収める(2026-07-27、Mikoto要望)。
+  // 「末尾に追加」「入れ替え」の違いは、この2つを並べた対比で伝わるようにしている。
+  appendBtn.textContent = "ファイルを追加で読み込む";
   appendBtn.addEventListener("click", () => {
     pendingLoadMode = "append";
     el.fileInput.click();
@@ -525,7 +658,7 @@ function renderFileToolsView(container) {
   const reloadBtn = document.createElement("button");
   reloadBtn.type = "button";
   reloadBtn.className = "btn btn--secondary btn--block";
-  reloadBtn.textContent = "別のファイルを読み込み直す(入れ替え)";
+  reloadBtn.textContent = "別のファイルに入れ替える";
   reloadBtn.addEventListener("click", () => {
     const ok = window.confirm(
       "現在の編集内容を破棄して、別のファイルを読み込み直します。よろしいですか?\n" +
@@ -832,6 +965,20 @@ function updateRibbonVisibility() {
   updateRibbonActionButtons();
   updateUndoButton();
 }
+
+// 貼り付けは常にプレーンテキストとして扱う(2026-07-27のセキュリティ点検にもとづく対策)。
+// contenteditableの既定では書式付き(HTML)で貼り付くため、悪意あるWebページからコピーした
+// 場合にイベントハンドラ属性などが本文に混入し、書き出しファイルにまで残る可能性がある。
+// シナリオ本文の整形が目的で書式ごと貼り付ける必要もないため、テキストだけを挿入する。
+el.editorBody.addEventListener("paste", (e) => {
+  e.preventDefault();
+  const text = (e.clipboardData || window.clipboardData).getData("text/plain");
+  if (!text) return;
+  pushUndoSnapshot();
+  // 改行を含む貼り付けでも段落構造が壊れないよう、execCommandの標準的な挿入に委ねる。
+  document.execCommand("insertText", false, text);
+  scheduleAutoRender();
+});
 
 // 本文に触り始めた時点で検索マークを外す(2026-07-27)。
 //
@@ -2246,7 +2393,10 @@ function buildStandaloneHtml() {
   const tocHtml = getHeadingMarks()
     .map((m) => {
       const level = parseInt(m.dataset.level || "1", 10);
-      return `<a href="#${m.dataset.hid}" style="padding-left:${(level - 1) * 14}px" onclick="jumpToHeading('${m.dataset.hid}');return false;">${escapeHtml(m.textContent)}</a>`;
+      // 以前はonclick属性にhidを生で埋めており、細工したhidでJSを注入できてしまっていた
+      // (2026-07-27のセキュリティ点検で確認)。属性値としてエスケープして持たせ、
+      // クリック処理は書き出し先のJS側でイベント委譲する方式に変更した。
+      return `<a href="#${escapeHtml(m.dataset.hid)}" class="toc-link" data-hid="${escapeHtml(m.dataset.hid)}" style="padding-left:${(level - 1) * 14}px">${escapeHtml(m.textContent)}</a>`;
     })
     .join("\n");
 
@@ -2261,13 +2411,28 @@ function buildStandaloneHtml() {
   };
   const jsonText = JSON.stringify(jsonData, null, 2).replace(/</g, "\\u003c");
 
+  // 書き出したファイル自体にもCSPを付け、多層防御にする(2026-07-27のセキュリティ点検)。
+  // nonceを付けた自前の<style>/<script>だけを許可するため、万一本文に
+  // イベントハンドラ属性(on*)が紛れ込んでも、開いた先のブラウザ側で実行が止まる。
+  // default-src 'none' により外部への通信・読み込みも一切行わない。
+  const nonce = uid("n").replace(/[^A-Za-z0-9]/g, "").slice(0, 32);
+  const csp = [
+    "default-src 'none'",
+    `style-src 'nonce-${nonce}'`,
+    `script-src 'nonce-${nonce}'`,
+    "img-src data:",
+    "base-uri 'none'",
+    "form-action 'none'",
+  ].join("; ");
+
   return `<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="${csp}" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>${escapeHtml(state.meta.sourceFileName || "シナリオ")}</title>
-<style>
+<style nonce="${nonce}">
 ${STANDALONE_CSS}
 </style>
 </head>
@@ -2289,10 +2454,10 @@ ${bodyHtml}
   </aside>
 </div>
 <div class="toast" id="toast" hidden></div>
-<script>
+<script nonce="${nonce}">
 ${STANDALONE_JS}
 </script>
-<script type="application/json" id="${STATE_SCRIPT_ID}">
+<script type="application/json" id="${STATE_SCRIPT_ID}" nonce="${nonce}">
 ${jsonText}
 </script>
 </body>
@@ -2450,6 +2615,13 @@ document.getElementById('btn-toc-open').addEventListener('click', function () {
 });
 document.getElementById('btn-toc-close').addEventListener('click', function () {
   document.getElementById('toc-panel').classList.remove('is-open');
+});
+// 目次リンクはonclick属性をやめ、data-hidを読むイベント委譲に変更(2026-07-27)
+document.addEventListener('click', function (e) {
+  var a = e.target.closest('.toc-link');
+  if (!a) return;
+  e.preventDefault();
+  jumpToHeading(a.getAttribute('data-hid'));
 });
 document.addEventListener('click', function (e) {
   var link = e.target.closest('.int-link');
