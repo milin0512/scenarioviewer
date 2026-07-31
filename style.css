@@ -780,3 +780,53 @@ body.mode-preview .app-header__menu-btn {
 }
 
 .sidebar__export-row button { flex-shrink: 0; }
+
+/* 上書き保存の保存先表示(5.14)。ファイル名は長くなりがちなので折り返しを許可する */
+.export-target {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+}
+
+#btn-export-saveas, #btn-export-share { margin-top: 8px; }
+
+/* ============ 自動保存からの復元(5.17) ============ */
+
+.resume {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.resume__title {
+  font-size: 0.9rem;
+  margin: 0 0 4px;
+  color: var(--accent-dark);
+}
+
+.resume__desc {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin: 0 0 10px;
+}
+
+/* ファイル名は長くなりがちなので、名前を1行に収めず折り返させる。
+   狭い画面ではボタンが下に回り込むよう flex-wrap を使う。 */
+.resume__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.resume__row:last-child { border-bottom: none; }
+
+.resume__name {
+  flex: 1 1 160px;
+  min-width: 0;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}

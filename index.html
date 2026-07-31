@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#ff9500" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-title" content="シナリオ整形ツール" />
-<link rel="stylesheet" href="style.css?v=10" />
+<link rel="stylesheet" href="style.css?v=12" />
 </head>
 <body class="mode-edit">
 
@@ -81,6 +81,11 @@
       </select>
       <button type="button" class="btn btn--secondary" id="btn-export-download">書き出す</button>
     </div>
+    <!-- 上書き保存(5.14)。File System Access API対応ブラウザでHTMLを選んでいるときだけ表示する -->
+    <p class="export-target" id="export-target" hidden></p>
+    <button type="button" class="btn btn--secondary btn--small btn--block" id="btn-export-saveas" hidden>別名で保存</button>
+    <!-- iPhone・iPad向け(5.14)。共有シートの「ファイルに保存」から、同名ファイルを置き換えられる -->
+    <button type="button" class="btn btn--secondary btn--small btn--block" id="btn-export-share" hidden>共有して保存</button>
   </div>
   <div class="sidebar__body" id="sidebar-body"></div>
 </aside>
@@ -98,6 +103,13 @@
     <label class="btn btn--primary btn--block" for="file-input">ファイルを選ぶ</label>
     <input type="file" id="file-input" accept=".pdf,.txt,.html,application/pdf,text/plain,text/html" multiple hidden />
     <p class="load-status" id="load-status">まだファイルが読み込まれていません。</p>
+
+    <!-- 自動保存からの復元(5.17)。保存データがあるときだけ表示する -->
+    <div class="resume" id="resume-panel" hidden>
+      <h3 class="resume__title">前回の続き</h3>
+      <p class="resume__desc">編集内容はこのブラウザ内に自動保存されています。続きから再開できます。</p>
+      <div id="resume-list"></div>
+    </div>
   </section>
 
   <!-- 編集エリア -->
@@ -135,6 +147,6 @@
 <div class="toast" id="toast" hidden></div>
 
 <script src="vendor/pdfjs/pdf.min.js"></script>
-<script src="app.js?v=11"></script>
+<script src="app.js?v=13"></script>
 </body>
 </html>

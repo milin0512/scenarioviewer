@@ -40,6 +40,8 @@ const el = {
   sectionLoad: document.getElementById("section-load"),
   fileInput: document.getElementById("file-input"),
   loadStatus: document.getElementById("load-status"),
+  resumePanel: document.getElementById("resume-panel"),
+  resumeList: document.getElementById("resume-list"),
 
   sectionEditor: document.getElementById("section-editor"),
   editorBody: document.getElementById("editor-body"),
@@ -66,6 +68,9 @@ const el = {
   exportBar: document.getElementById("export-bar"),
   exportFormatSelect: document.getElementById("export-format-select"),
   btnExportDownload: document.getElementById("btn-export-download"),
+  btnExportSaveAs: document.getElementById("btn-export-saveas"),
+  btnExportShare: document.getElementById("btn-export-share"),
+  exportTarget: document.getElementById("export-target"),
 
   linkPickerBackdrop: document.getElementById("link-picker-backdrop"),
   linkPicker: document.getElementById("link-picker"),
@@ -183,6 +188,7 @@ function applyLoadedParts(parts, mode) {
   state.npcs = npcs;
   const kindLabel = parts.length > 1 ? `${parts.length}ファイルを連結` : parts[0].kind;
   finishLoad(names, kindLabel);
+  adoptStoredHandleForNames(parts.map((p) => p.fileName));
 }
 
 function plainTextToParagraphsHtml(text) {
@@ -554,6 +560,10 @@ function finishLoad(fileName, kindLabel) {
   // 元に戻す履歴もリセットする(2026-07-25)。
   undoStack = [];
   updateUndoButton();
+  // 別のシナリオを読み込んだ状態で前のシナリオのHTMLを上書きしてしまわないよう、
+  // 保存先も一度手放す(同じファイルを開き直した場合のみ、この直後に引き継がれる。5.14)。
+  htmlFileHandle = null;
+  updateExportUi();
   setMode("edit");
 }
 
@@ -2410,6 +2420,9 @@ function renderPreview() {
 
 let renderTimer = null;
 function scheduleAutoRender() {
+  // 本文・NPC・見出しに変更があったときは必ずここを通るので、自動保存(5.17)も
+  // まとめてここから予約する。プレビュー再描画と違い、編集モードでも走らせる。
+  scheduleAutosave();
   if (state.mode !== "preview") return;
   clearTimeout(renderTimer);
   renderTimer = setTimeout(renderPreview, 150);
@@ -2867,15 +2880,347 @@ function downloadFile(content, mimeType, fileName) {
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
-el.btnExportDownload.addEventListener("click", () => {
-  const base = (state.meta.sourceFileName || "シナリオ").replace(/\.[^.]+$/, "");
+/* ------------------------------------------------------------
+ * HTMLの上書き保存(5.14)
+ *
+ * 一時保存のたびに新しいファイルが増えてフォルダが煩雑になる、という要望
+ * (2026-08-01、Mikoto)への対応。File System Access APIで保存先ファイルへの
+ * 参照(ハンドル)を保持し、2回目以降はダイアログなしで同じファイルを上書きする。
+ * このAPIはChrome/Edge系のみ対応で、Safari(iOS/macOS)とFirefoxは非対応のため、
+ * 非対応環境では従来通りの<a download>方式にそのままフォールバックする。
+ * ---------------------------------------------------------- */
+
+const canOverwriteSave =
+  typeof window.showSaveFilePicker === "function" && window.isSecureContext;
+
+// ハンドルはJSONに直列化できずlocalStorageに入らないため、IndexedDBに保存する。
+// 同じDBを自動保存(5.17)とも共用している。
+const DB_NAME = "scenario-tool";
+const DB_VERSION = 2;
+const STORE_HANDLES = "handles";
+const STORE_AUTOSAVES = "autosaves";
+const HANDLE_KEY = "html-export";
+
+function withStore(storeName, mode, run) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open(DB_NAME, DB_VERSION);
+    open.onupgradeneeded = () => {
+      const db = open.result;
+      if (!db.objectStoreNames.contains(STORE_HANDLES)) db.createObjectStore(STORE_HANDLES);
+      if (!db.objectStoreNames.contains(STORE_AUTOSAVES)) db.createObjectStore(STORE_AUTOSAVES);
+    };
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const db = open.result;
+      const tx = db.transaction(storeName, mode);
+      const req = run(tx.objectStore(storeName));
+      tx.oncomplete = () => {
+        db.close();
+        resolve(req ? req.result : undefined);
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error);
+      };
+    };
+  });
+}
+
+// プライベートブラウズなどIndexedDBが使えない環境でも、上書き保存以外の動作は
+// 妨げないよう、失敗しても黙って諦める。
+async function loadStoredHandle() {
+  try {
+    return (await withStore(STORE_HANDLES, "readonly", (s) => s.get(HANDLE_KEY))) || null;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function storeHandle(handle) {
+  try {
+    await withStore(STORE_HANDLES, "readwrite", (s) => s.put(handle, HANDLE_KEY));
+  } catch (err) {
+    /* 保存できなくても、そのセッション中の上書き保存は動く */
+  }
+}
+
+let htmlFileHandle = null; // 現在の上書き保存先。ファイルを読み込み直すとリセットする
+let isSaving = false;
+
+function exportBaseName() {
+  return (state.meta.sourceFileName || "シナリオ").replace(/\.[^.]+$/, "");
+}
+
+// iPhone・iPad向けの代替手段(2026-08-01)。iOSにはページからローカルファイルを直接
+// 上書きする仕組みがないため、共有シートの「ファイルに保存」を経由させる。同じ場所に
+// 同じ名前で保存しようとするとiOS側が「置き換え」を提案するので、実質的な上書きになる。
+function detectShareFileSupport() {
+  try {
+    if (!navigator.share || !navigator.canShare) return false;
+    const probe = new File(["<!doctype html>"], "probe.html", { type: "text/html" });
+    return navigator.canShare({ files: [probe] });
+  } catch (err) {
+    return false;
+  }
+}
+
+const canShareHtmlFile = detectShareFileSupport();
+
+function updateExportUi() {
+  const isHtml = el.exportFormatSelect.value === "html";
+  const hasTarget = canOverwriteSave && isHtml && !!htmlFileHandle;
+  el.btnExportDownload.textContent = hasTarget ? "上書き保存" : "書き出す";
+  el.exportTarget.textContent = hasTarget ? `保存先: ${htmlFileHandle.name}` : "";
+  el.exportTarget.hidden = !hasTarget;
+  el.btnExportSaveAs.hidden = !hasTarget;
+  el.btnExportShare.hidden = !(canShareHtmlFile && isHtml);
+}
+
+async function shareHtmlFile(content) {
+  const file = new File([content], exportBaseName() + "_整形.html", { type: "text/html" });
+  try {
+    await navigator.share({ files: [file], title: exportBaseName() });
+  } catch (err) {
+    // 共有シートを閉じた(AbortError)場合は通知しない
+    if (err && err.name === "AbortError") return;
+    showToast("共有できませんでした。", true);
+  }
+}
+
+// 前回の保存先と同じファイルを開き直したときだけ、上書き先として引き継ぐ。
+// 別のシナリオを読み込んでいるときに前のシナリオを上書きしてしまうのを防ぐため、
+// ファイル名が一致する場合に限定している。
+async function adoptStoredHandleForNames(fileNames) {
+  if (!canOverwriteSave) return;
+  const stored = await loadStoredHandle();
+  if (!stored || !fileNames.includes(stored.name)) return;
+  htmlFileHandle = stored;
+  updateExportUi();
+}
+
+// リロード後の初回保存では、ブラウザが書き込み許可をユーザーに再確認する。
+// これはブラウザ側の仕様で省略できない。
+async function writeToHandle(handle, content) {
+  const opts = { mode: "readwrite" };
+  if (typeof handle.queryPermission === "function") {
+    let perm = await handle.queryPermission(opts);
+    if (perm !== "granted" && typeof handle.requestPermission === "function") {
+      perm = await handle.requestPermission(opts);
+    }
+    if (perm !== "granted") return false;
+  }
+  const writable = await handle.createWritable();
+  await writable.write(content);
+  await writable.close();
+  return true;
+}
+
+async function saveHtmlAs(content) {
+  let handle;
+  try {
+    handle = await window.showSaveFilePicker({
+      suggestedName: exportBaseName() + "_整形.html",
+      types: [{ description: "HTMLファイル", accept: { "text/html": [".html"] } }],
+    });
+  } catch (err) {
+    return; // ダイアログをキャンセルした(AbortError)場合は何もしない
+  }
+  if (await writeToHandle(handle, content)) {
+    htmlFileHandle = handle;
+    await storeHandle(handle);
+    updateExportUi();
+    showToast("保存しました。");
+  } else {
+    showToast("保存が許可されませんでした。", true);
+  }
+}
+
+async function runExport(forceSaveAs) {
+  if (isSaving) return;
+  const base = exportBaseName();
   const format = el.exportFormatSelect.value;
 
   if (format === "markdown") {
     downloadFile(buildMarkdownExport(), "text/markdown", base + "_記録用.md");
-  } else if (format === "text") {
-    downloadFile(buildTxtExport(), "text/plain", base + "_記録用.txt");
-  } else {
-    downloadFile(buildStandaloneHtml(), "text/html", base + "_整形.html");
+    return;
   }
-});
+  if (format === "text") {
+    downloadFile(buildTxtExport(), "text/plain", base + "_記録用.txt");
+    return;
+  }
+
+  const content = buildStandaloneHtml();
+  if (!canOverwriteSave) {
+    downloadFile(content, "text/html", base + "_整形.html");
+    return;
+  }
+
+  isSaving = true;
+  el.btnExportDownload.disabled = true;
+  el.btnExportSaveAs.disabled = true;
+  try {
+    if (!forceSaveAs && htmlFileHandle) {
+      const ok = await writeToHandle(htmlFileHandle, content);
+      showToast(ok ? "上書き保存しました。" : "保存が許可されませんでした。", !ok);
+    } else {
+      await saveHtmlAs(content);
+    }
+  } catch (err) {
+    // 保存先ファイルが移動・削除されている場合などにここへ来る。
+    // 参照が無効になっているので手放し、別名保存からやり直してもらう。
+    htmlFileHandle = null;
+    updateExportUi();
+    showToast("保存できませんでした。もう一度お試しください。", true);
+  } finally {
+    isSaving = false;
+    el.btnExportDownload.disabled = false;
+    el.btnExportSaveAs.disabled = false;
+  }
+}
+
+el.btnExportDownload.addEventListener("click", () => runExport(false));
+el.btnExportSaveAs.addEventListener("click", () => runExport(true));
+el.btnExportShare.addEventListener("click", () => shareHtmlFile(buildStandaloneHtml()));
+el.exportFormatSelect.addEventListener("change", updateExportUi);
+updateExportUi();
+
+/* ============================================================
+ * 自動保存と復元(5.17)
+ *
+ * iPhone・iPadではローカルファイルの上書き保存ができない(5.14)ため、
+ * 「作業途中は保存操作そのものを不要にする」方向で解決する(2026-08-01、Mikoto要望)。
+ * 編集内容をブラウザ内(IndexedDB)に自動保存し、次に開いたときに続きから再開できる
+ * ようにすることで、一時保存のためにファイルを書き出す必要をなくす。
+ * ========================================================== */
+
+const AUTOSAVE_MAX = 5; // 直近5シナリオ分だけ残す
+const AUTOSAVE_DELAY_MS = 3000;
+
+// 検索マーク(.search-hit)は表示用の一時的なもので、書き出しにも含めていない(5.16)。
+// 実行中の検索を邪魔しないよう、複製した側から取り除いてから保存する。
+function currentBodyHtmlForSave() {
+  const clone = el.editorBody.cloneNode(true);
+  clone.querySelectorAll(".search-hit").forEach((mark) => {
+    const parent = mark.parentNode;
+    if (!parent) return;
+    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+    mark.remove();
+    parent.normalize();
+  });
+  return clone.innerHTML;
+}
+
+let autosaveTimer = null;
+function scheduleAutosave() {
+  if (!state.loaded) return;
+  clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(runAutosave, AUTOSAVE_DELAY_MS);
+}
+
+async function runAutosave() {
+  if (!state.loaded) return;
+  const key = state.meta.sourceFileName || "シナリオ";
+  const entry = {
+    key,
+    sourceFileName: key,
+    savedAt: new Date().toISOString(),
+    bodyHtml: currentBodyHtmlForSave(),
+    // NPCに複製できない値が紛れ込んでいても保存が失敗しないよう、JSONを経由して単純化する。
+    npcs: JSON.parse(JSON.stringify(state.npcs || [])),
+  };
+  try {
+    await withStore(STORE_AUTOSAVES, "readwrite", (s) => s.put(entry, key));
+    await pruneAutosaves();
+  } catch (err) {
+    /* 保存できなくても編集は続けられるので、通知はしない */
+  }
+}
+
+async function listAutosaves() {
+  try {
+    const all = await withStore(STORE_AUTOSAVES, "readonly", (s) => s.getAll());
+    return (all || []).sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt)));
+  } catch (err) {
+    return [];
+  }
+}
+
+async function pruneAutosaves() {
+  const list = await listAutosaves();
+  for (const entry of list.slice(AUTOSAVE_MAX)) {
+    await withStore(STORE_AUTOSAVES, "readwrite", (s) => s.delete(entry.key));
+  }
+}
+
+function relativeTimeLabel(iso) {
+  const t = Date.parse(iso);
+  if (!t) return "";
+  const min = Math.floor((Date.now() - t) / 60000);
+  if (min < 1) return "たった今";
+  if (min < 60) return `${min}分前`;
+  const hours = Math.floor(min / 60);
+  if (hours < 24) return `${hours}時間前`;
+  return `${Math.floor(hours / 24)}日前`;
+}
+
+async function renderResumePanel() {
+  const list = await listAutosaves();
+  el.resumeList.textContent = "";
+  if (list.length === 0) {
+    el.resumePanel.hidden = true;
+    return;
+  }
+  list.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "resume__row";
+
+    // ファイル名は読み込んだファイル由来の文字列なので、必ずtextContentで入れる(8.1)。
+    const name = document.createElement("span");
+    name.className = "resume__name";
+    name.textContent = `${entry.sourceFileName}(${relativeTimeLabel(entry.savedAt)})`;
+
+    const restore = document.createElement("button");
+    restore.type = "button";
+    restore.className = "btn btn--secondary btn--small";
+    restore.textContent = "復元";
+    restore.addEventListener("click", () => restoreAutosave(entry));
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "btn btn--danger btn--small";
+    remove.textContent = "削除";
+    remove.addEventListener("click", async () => {
+      try {
+        await withStore(STORE_AUTOSAVES, "readwrite", (s) => s.delete(entry.key));
+      } catch (err) {
+        /* 消せなくても一覧の再描画で状態は合う */
+      }
+      renderResumePanel();
+    });
+
+    row.append(name, restore, remove);
+    el.resumeList.appendChild(row);
+  });
+  el.resumePanel.hidden = false;
+}
+
+function restoreAutosave(entry) {
+  // 保存時点で洗浄済みの本文だが、保存領域が後から書き換えられている可能性を考え、
+  // ファイル読み込みと同じサニタイズを必ず通す(8.1)。
+  el.editorBody.innerHTML = sanitizeLoadedBodyHtml(entry.bodyHtml || "");
+  state.meta = {
+    schemaVersion: SCHEMA_VERSION,
+    savedAt: entry.savedAt || null,
+    sourceFileName: entry.sourceFileName || "シナリオ",
+  };
+  state.npcs = sanitizeLoadedNpcs(entry.npcs || []);
+  finishLoad(state.meta.sourceFileName, "自動保存から復元");
+  // 複数ファイルを連結した場合、sourceFileNameは " / " 区切りで連結されている(5.1)。
+  adoptStoredHandleForNames(String(state.meta.sourceFileName).split(" / "));
+}
+
+// 本文への直接入力(キー入力・IME確定など)を拾う。ボタン操作による変更は
+// scheduleAutoRender 側からまとめて拾っている。
+el.editorBody.addEventListener("input", scheduleAutosave);
+
+renderResumePanel();
