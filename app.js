@@ -2979,7 +2979,10 @@ function updateExportUi() {
 async function shareHtmlFile(content) {
   const file = new File([content], exportBaseName() + "_整形.html", { type: "text/html" });
   try {
-    await navigator.share({ files: [file], title: exportBaseName() });
+    // filesと一緒にtitle/textを渡すと、iOSがそれを別の共有項目として扱い、
+    // 「ファイルに保存」でテキストファイルとHTMLファイルの2つが作られてしまう
+    // (2026-08-01、Mikoto実機報告)。共有するのはファイル1つだけにする。
+    await navigator.share({ files: [file] });
   } catch (err) {
     // 共有シートを閉じた(AbortError)場合は通知しない
     if (err && err.name === "AbortError") return;
