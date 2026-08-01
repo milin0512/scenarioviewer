@@ -851,6 +851,47 @@ function clearSearchHighlights() {
   updateFindBarStatus();
 }
 
+// 検索マークの解除はテキストノードを分割し直すため、DOMの書き換えをまたいで位置を
+// 保つには、ノードと相対位置ではなく「本文全体を通した文字位置」に直しておく必要がある。
+function rangeToOffsets(root, range) {
+  if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return null;
+  const probe = document.createRange();
+  probe.selectNodeContents(root);
+  probe.setEnd(range.startContainer, range.startOffset);
+  const start = probe.toString().length;
+  probe.setEnd(range.endContainer, range.endOffset);
+  return { start, end: probe.toString().length };
+}
+
+function offsetsToRange(root, off) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const range = document.createRange();
+  let pos = 0;
+  let startDone = false;
+  let node;
+  while ((node = walker.nextNode())) {
+    const len = node.data.length;
+    if (!startDone && pos + len >= off.start) {
+      range.setStart(node, off.start - pos);
+      startDone = true;
+    }
+    if (startDone && pos + len >= off.end) {
+      range.setEnd(node, off.end - pos);
+      return range;
+    }
+    pos += len;
+  }
+  return null;
+}
+
+// 検索マークを外したうえで、渡された範囲を新しいDOM上に貼り直して返す。
+function clearSearchHighlightsKeepingRange(range) {
+  if (searchHits.length === 0) return range;
+  const off = range ? rangeToOffsets(el.editorBody, range) : null;
+  clearSearchHighlights();
+  return off ? offsetsToRange(el.editorBody, off) : null;
+}
+
 // 一致箇所をすべて<span class="search-hit">で包み、その件数を返す。
 function highlightAllMatches(searchTerm) {
   clearSearchHighlights();
@@ -962,8 +1003,14 @@ function captureCurrentSelectionIfAny() {
 }
 
 // リボンは編集モード中は常時表示し、選択範囲の有無でボタンの有効/無効だけを切り替える。
+// selectionchangeは指で範囲を伸縮している間ずっと連続して発火するため、状態が
+// 変わっていないときは何も書き込まない(iOSで選択操作が重くならないようにするため。
+// 2026-08-01)。
+let ribbonActionsEnabled = null;
 function updateRibbonActionButtons() {
   const enabled = state.mode === "edit" && !!savedRange;
+  if (enabled === ribbonActionsEnabled) return;
+  ribbonActionsEnabled = enabled;
   ribbonActionBtns.forEach((btn) => { btn.disabled = !enabled; });
 }
 
@@ -990,18 +1037,35 @@ el.editorBody.addEventListener("paste", (e) => {
   scheduleAutoRender();
 });
 
-// 本文に触り始めた時点で検索マークを外す(2026-07-27)。
+// 検索マークを外すタイミング(2026-08-01に見直し)。
 //
-// マーク解除はDOM(テキストノードの分割)を書き換えるため、選択が確定した後に行うと
-// 控えておいた選択範囲(savedRange)が無効になってしまう。そこで、選択が始まる前の
-// mousedown/touchstart/keydownの時点で外し、以降の選択・編集は必ずマークのない
-// きれいな本文に対して行われるようにしている。
-// (サイドバーの「検索する」「次の一致箇所へ」は本文外の操作なので、これらでは消えない)
-["mousedown", "touchstart", "keydown"].forEach((type) => {
-  el.editorBody.addEventListener(type, () => {
-    if (searchHits.length > 0) clearSearchHighlights();
-  });
+// 以前はmousedown/touchstart/keydownで外していたが、これはタップの最中に本文のDOMを
+// 作り替えることになる。iOSはtouchstartで当てた位置をもとに指を離した時点でカーソルを
+// 置くため、その間にテキストノードが消えると、タップした場所と違う位置にカーソルが
+// 飛んだり、意図しない範囲が選択されたりする(2026-08-01、Mikoto報告。実測では
+// touchstart1回につき本文へ14件のDOM変更が発生していた)。
+//
+// そこで、タップ中には一切DOMを触らないようにし、外すのは
+//   (1) 実際に文字が入力されたあと(inputイベント。カーソルは文字位置で復元する)
+//   (2) リボンのボタンで見出し化・装飾を適用する直前(範囲は文字位置で貼り直す)
+// の2箇所だけにした。読む・カーソルを合わせるだけの操作ではマークは消えない。
+function clearSearchHighlightsAfterEdit() {
+  if (searchHits.length === 0) return;
+  const sel = window.getSelection();
+  const current = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+  const restored = clearSearchHighlightsKeepingRange(current);
+  if (restored && sel) {
+    sel.removeAllRanges();
+    sel.addRange(restored);
+  }
+}
+
+el.editorBody.addEventListener("input", (e) => {
+  // 日本語入力の変換中にDOMを作り替えると変換が壊れるため、確定するまで待つ。
+  if (e.isComposing) return;
+  clearSearchHighlightsAfterEdit();
 });
+el.editorBody.addEventListener("compositionend", clearSearchHighlightsAfterEdit);
 
 el.miniToolbar.querySelectorAll("button[data-action]").forEach((btn) => {
   btn.addEventListener("mousedown", (e) => {
@@ -1144,9 +1208,12 @@ function removeCopyButtonMark(wrapperEl) {
 
 function applyMarkToSelection(type) {
   if (!savedRange) return;
-  const range = savedRange;
+  let range = savedRange;
   savedRange = null;
-  if (!el.editorBody.contains(range.commonAncestorContainer)) { updateRibbonActionButtons(); return; }
+  // 検索マークが残っているとテキストノードが分割されたままで、見出し化や装飾が
+  // 中途半端に適用される。ここで外し、範囲は文字位置で貼り直す。
+  range = clearSearchHighlightsKeepingRange(range);
+  if (!range || !el.editorBody.contains(range.commonAncestorContainer)) { updateRibbonActionButtons(); return; }
 
   try {
     if (type === "heading") {
@@ -3112,6 +3179,9 @@ const AUTOSAVE_DELAY_MS = 3000;
 // 検索マーク(.search-hit)は表示用の一時的なもので、書き出しにも含めていない(5.16)。
 // 実行中の検索を邪魔しないよう、複製した側から取り除いてから保存する。
 function currentBodyHtmlForSave() {
+  // 検索マークが無いときが大半なので、その場合は複製せずそのまま返す
+  // (長いシナリオでは本文全体の複製が数秒おきの負荷になるため。2026-08-01)。
+  if (!el.editorBody.querySelector(".search-hit")) return el.editorBody.innerHTML;
   const clone = el.editorBody.cloneNode(true);
   clone.querySelectorAll(".search-hit").forEach((mark) => {
     const parent = mark.parentNode;
