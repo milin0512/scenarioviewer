@@ -1358,13 +1358,21 @@ function applyCopyButtonMark(range) {
   });
 }
 
+// プレビューは本文を複製して作られるため、同じcpidを持つ要素は編集エリアと
+// プレビューの両方に存在しうる。document全体から拾うと同じ範囲を二重に数えて
+// しまうので、探索範囲は必ず操作対象のエリア内に限定する
+// (2026-08-01、コピー内容が2回繰り返される不具合として発覚。Mikoto報告)。
+function copyScopeOf(node) {
+  return node.closest("#preview-content") || node.closest("#editor-body") || document;
+}
+
 // 複数段落にまたがるコピー範囲は、同じcpidを持つ.cp-wrapが複数存在しうるため、
 // 見つかった1つだけでなく同じcpidのものをすべて解除する(2026-07-25、Mikoto報告・修正)。
 // applyCopyButtonMarkで0にした<p>の下マージンもここで元に戻す。
 function removeCopyButtonMark(wrapperEl) {
   const cpId = wrapperEl.dataset.cpid;
   const wrappers = cpId
-    ? Array.from(document.querySelectorAll(`.cp-wrap[data-cpid="${cpId}"]`))
+    ? Array.from(copyScopeOf(wrapperEl).querySelectorAll(`.cp-wrap[data-cpid="${cpId}"]`))
     : [wrapperEl];
   wrappers.forEach((w) => {
     const target = w.querySelector(".cp-target");
@@ -1386,7 +1394,7 @@ document.addEventListener("click", (e) => {
   if (btn.dataset.copyText !== undefined) {
     text = btn.dataset.copyText;
   } else {
-    const spans = document.querySelectorAll(`.cp-target[data-cpid="${btn.dataset.cpid}"]`);
+    const spans = copyScopeOf(btn).querySelectorAll(`.cp-target[data-cpid="${btn.dataset.cpid}"]`);
     text = Array.from(spans).map((s) => s.textContent).join("\n");
   }
   copyTextToClipboard(text);
@@ -2440,9 +2448,11 @@ function buildStandaloneHtml() {
   const bodyClone = el.editorBody.cloneNode(true);
   // コピペボタンの対象テキストを data-copy-text に埋め込み、
   // 書き出し後の単体HTMLだけでもクリップボードコピーが動くようにする。
+  // 複数段落にまたがる範囲は同じcpidの.cp-targetが段落の数だけ存在するため、
+  // すべて連結する(1つ目だけを埋めると、書き出し後に途中までしかコピーできない)。
   bodyClone.querySelectorAll(".cp-btn").forEach((btn) => {
-    const span = bodyClone.querySelector(`.cp-target[data-cpid="${btn.dataset.cpid}"]`);
-    btn.setAttribute("data-copy-text", span ? span.textContent : "");
+    const spans = bodyClone.querySelectorAll(`.cp-target[data-cpid="${btn.dataset.cpid}"]`);
+    btn.setAttribute("data-copy-text", Array.from(spans).map((s) => s.textContent).join("\n"));
   });
 
   const toggleTree = buildToggleTree(bodyClone);
