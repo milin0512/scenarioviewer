@@ -834,6 +834,10 @@ let lastSearchTerm = "";
 // 直前の検索が「0件」だったかどうか。本文を編集してマークが外れただけの状態と、
 // 検索した結果1件も無かった状態を、メニューの表示で区別するために持っている。
 let lastSearchFoundNone = false;
+// マークを付けた時点の本文テキスト。「本文が実際に変わったか」の判定に使う
+// (下のclearSearchHighlightsAfterEdit参照)。マークは<span>で包むだけなので、
+// テキストとしての中身はマークの有無に影響されない。
+let searchBaseText = null;
 
 function clearSearchHighlights() {
   const marks = Array.from(el.editorBody.querySelectorAll(".search-hit"));
@@ -848,6 +852,7 @@ function clearSearchHighlights() {
   searchHits = [];
   searchHitIndex = 0;
   lastSearchFoundNone = false;
+  searchBaseText = null;
   updateFindBarStatus();
 }
 
@@ -934,6 +939,7 @@ function highlightAllMatches(searchTerm) {
   searchHits = Array.from(el.editorBody.querySelectorAll(".search-hit"));
   searchHitIndex = 0;
   lastSearchFoundNone = searchHits.length === 0;
+  searchBaseText = el.editorBody.textContent;
   return searchHits.length;
 }
 
@@ -1051,6 +1057,10 @@ el.editorBody.addEventListener("paste", (e) => {
 // の2箇所だけにした。読む・カーソルを合わせるだけの操作ではマークは消えない。
 function clearSearchHighlightsAfterEdit() {
   if (searchHits.length === 0) return;
+  // iOSでは、本文をタップしただけでもinput・compositionendが飛んでくることがある
+  // (2026-08-01、Mikoto実機報告。カーソルを合わせただけでマークが消えていた)。
+  // 本文のテキストが実際に変わっていなければ、編集ではないのでマークは外さない。
+  if (searchBaseText !== null && el.editorBody.textContent === searchBaseText) return;
   const sel = window.getSelection();
   const current = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
   const restored = clearSearchHighlightsKeepingRange(current);
