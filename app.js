@@ -136,7 +136,7 @@ async function readFileAsPart(file) {
   const isPdf = /\.pdf$/i.test(file.name) || file.type === "application/pdf";
   if (isPdf) {
     const text = await extractPdfText(file);
-    return { fileName: file.name, kind: "PDF", html: plainTextToParagraphsHtml(text), npcs: [] };
+    return { fileName: file.name, kind: "PDF", html: plainTextToStructureHtml(text), npcs: [] };
   }
 
   const buffer = await file.arrayBuffer();
@@ -152,7 +152,7 @@ async function readFileAsPart(file) {
       meta: data,
     };
   }
-  return { fileName: file.name, kind: "TXT", html: plainTextToParagraphsHtml(text), npcs: [] };
+  return { fileName: file.name, kind: "TXT", html: plainTextToStructureHtml(text), npcs: [] };
 }
 
 function applyLoadedParts(parts, mode) {
@@ -259,13 +259,45 @@ function normalizeEditorStructure() {
   body.normalize();
 }
 
-function plainTextToParagraphsHtml(text) {
-  // 空行は&nbsp;(実体は半角スペース相当の文字)ではなく<br>で高さを保持する。
-  // &nbsp;だと選択・コピー・NPC自動抽出時などに余分な空白文字として残ってしまうため
-  // (2026-07-24、Mikoto報告)。
-  return text
-    .split(/\r\n|\r|\n/)
-    .map((line) => (line ? `<p>${escapeHtml(line)}</p>` : "<p><br></p>"))
+/* ============================================================
+ * 改行と段落の共通ルール(5.20、2026-08-13、Mikoto要望)
+ *
+ * 「空行 = 段落の区切り」「改行1つ = 詰まった改行」を、読み込み・キー入力・コピー・
+ * 貼り付け・書き出しのすべてで共通の規則にする。段落(<p>)の境界には余白(0.9em)が
+ * 入り、詰まった改行(<br>)には入らないため、この2つを使い分けられるとプレビューの
+ * 視認性が上がる、というのが出発点。
+ *
+ * 変換はこの2つの関数に集約し、どの経路でも同じ解釈になるようにしている。
+ * ========================================================== */
+
+// 本文の構造 → プレーンテキスト。段落は空行、詰まった改行は改行1つで表す。
+function structureToPlainText(root) {
+  const holder = root.cloneNode(true);
+  // コピペボタンのラベル(「📋コピー」)は本文ではないので持ち出さない。
+  holder.querySelectorAll(".cp-btn").forEach((btn) => btn.remove());
+  holder.querySelectorAll("br").forEach((br) => br.replaceWith(document.createTextNode("\n")));
+
+  const blocks = Array.from(holder.children).filter((n) => n.tagName === "P" || n.tagName === "DIV");
+  // 段落をまたがない範囲(1つの段落の内側だけ)は、そのまま文字列にする。
+  // 行末の<br>はブラウザが高さ確保のために置くものなので、末尾の改行は落とす。
+  if (blocks.length === 0) return (holder.textContent || "").replace(/\n$/, "");
+  return blocks.map((b) => (b.textContent || "").replace(/\n$/, "")).join("\n\n");
+}
+
+// プレーンテキスト → 本文の構造。段落の区切りの判定だけは、空行が2つ3つと続く実データ
+// にも耐えるよう「1つ以上の空行」を区切りとして扱う(書き出し側は常に空行1つ)。
+function plainTextToStructureHtml(text) {
+  // ファイル末尾の改行がそのまま余計な<br>になり、最終行がいきなり「空行の上」の
+  // 扱いになってしまうため、前後の改行は落としてから分割する。
+  const normalized = String(text).replace(/\r\n|\r/g, "\n").replace(/^\n+|\n+$/g, "");
+  return normalized
+    .split(/\n{2,}/)
+    .map((block) => {
+      // 空行だけで高さを保ちたい段落は<br>で1行分を確保する。&nbsp;だと選択・コピー・
+      // NPC自動抽出時に余分な空白文字として残ってしまうため(2026-07-24、Mikoto報告)。
+      if (block === "") return "<p><br></p>";
+      return "<p>" + block.split("\n").map(escapeHtml).join("<br>") + "</p>";
+    })
     .join("\n");
 }
 
@@ -1106,30 +1138,66 @@ el.editorBody.addEventListener("paste", (e) => {
   const text = (e.clipboardData || window.clipboardData).getData("text/plain");
   if (!text) return;
   pushUndoSnapshot();
-  // 改行を含む貼り付けでも段落構造が壊れないよう、execCommandの標準的な挿入に委ねる。
-  document.execCommand("insertText", false, text);
+
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
+  const range = sel.getRangeAt(0);
+  range.deleteContents();
+
+  // 5.20の規則で構造に起こしてから挿入する。読み込み・コピーと同じ解釈になるため、
+  // 本文をコピーして貼り直しても段落と詰まった改行がそのまま再現される。
+  // 組み立てにはサニタイズ済みのテキストしか使っていないが、経路を揃える意味で
+  // 読み込みと同じsanitizeLoadedBodyHtmlを通してから挿入する。
+  const holder = document.createElement("div");
+  holder.innerHTML = sanitizeLoadedBodyHtml(plainTextToStructureHtml(text));
+  const blocks = Array.from(holder.children).filter((n) => n.tagName === "P" || n.tagName === "DIV");
+  if (blocks.length === 0) return;
+
+  const block = closestBlock(range.startContainer);
+  if (!block || block === el.editorBody) {
+    // 段落の外に落ちた場合は、そのまま段落として並べる
+    const frag = document.createDocumentFragment();
+    blocks.forEach((b) => frag.appendChild(b));
+    range.insertNode(frag);
+  } else {
+    // 1段落分だけなら、その中身をカーソル位置に流し込んで段落は増やさない
+    const first = blocks.shift();
+    const inlineFrag = document.createDocumentFragment();
+    while (first.firstChild) inlineFrag.appendChild(first.firstChild);
+    const lastInserted = inlineFrag.lastChild;
+    range.insertNode(inlineFrag);
+
+    // 2段落目以降は、カーソルのあった段落の後ろに新しい段落として続ける
+    let anchor = block;
+    blocks.forEach((b) => {
+      anchor.parentNode.insertBefore(b, anchor.nextSibling);
+      anchor = b;
+    });
+
+    const caret = document.createRange();
+    const tailNode = blocks.length > 0 ? blocks[blocks.length - 1] : lastInserted;
+    if (tailNode) {
+      caret.setStartAfter(blocks.length > 0 ? tailNode.lastChild || tailNode : tailNode);
+      caret.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(caret);
+    }
+  }
+
+  normalizeEditorStructure();
   scheduleAutoRender();
 });
 
-// 本文内でのコピー・切り取り(2026-08-01、Mikoto報告への対応)。
+// 本文内でのコピー・切り取り(2026-08-01、Mikoto報告への対応。2026-08-13に5.20の
+// 規則へ合わせて改行の扱いを変更)。
 //
-// ブラウザ既定のプレーンテキスト化では、段落(<p>)の区切りが改行2つとして書き出される。
-// 本ツールは1行を1つの<p>で表しているため、本文内でコピーして貼り付けると、元には
-// なかった空行が行ごとに挟まってしまう(メモアプリなど、改行1つで渡してくるアプリから
-// 貼り付けたときは正常だった)。そこで、コピー時のプレーンテキストを自分で組み立て、
-// 段落の区切りを改行1つにして、コピー元と同じ見た目で貼り付くようにする。
+// ブラウザ既定のプレーンテキスト化では、段落の区切りも詰まった改行も区別されずに
+// 書き出されてしまう。5.20の規則(空行=段落の区切り、改行1つ=詰まった改行)に沿って
+// 自分で組み立てることで、コピーして貼り付けたときに元の構造がそのまま再現される。
 function selectionToPlainText(range) {
   const holder = document.createElement("div");
   holder.appendChild(range.cloneContents());
-  // コピペボタンのラベル(「📋コピー」)は本文ではないので持ち出さない。
-  holder.querySelectorAll(".cp-btn").forEach((btn) => btn.remove());
-  holder.querySelectorAll("br").forEach((br) => br.replaceWith(document.createTextNode("\n")));
-
-  const blocks = Array.from(holder.children).filter((n) => n.tagName === "P" || n.tagName === "DIV");
-  // 段落をまたがない選択(1つの段落の内側だけ)は、そのまま文字列にする。
-  if (blocks.length === 0) return holder.textContent.replace(/\n$/, "");
-  // 末尾の<br>はブラウザが高さ確保のために置くものなので、行の終わりの改行は落とす。
-  return blocks.map((b) => b.textContent.replace(/\n$/, "")).join("\n");
+  return structureToPlainText(holder);
 }
 
 function writeSelectionAsPlainText(e) {
@@ -1298,7 +1366,9 @@ function headingLabelText(markEl) {
   if (!markEl) return "";
   const clone = markEl.cloneNode(true);
   clone.querySelectorAll(".cp-btn").forEach((btn) => btn.remove());
-  return (clone.textContent || "").trim();
+  // 見出しの中に詰まった改行(<br>)があっても、一覧では1行で見せる(5.20)。
+  clone.querySelectorAll("br").forEach((br) => br.replaceWith(document.createTextNode(" ")));
+  return (clone.textContent || "").replace(/\s+/g, " ").trim();
 }
 
 // 見出しのラベル文字だけを書き換える(コピペボタンは壊さずに残す)。
@@ -1455,9 +1525,13 @@ function applyHeadingMark(range) {
   if (afterFrag.textContent.trim() !== "") {
     const afterP = document.createElement(tagName);
     afterP.appendChild(afterFrag);
+    // 見出しを段落の途中から切り出すと、直前で行を終えていた<br>が残りの先頭に来て
+    // 空行になってしまう。段落が分かれた時点で不要なので落とす(5.20)。
+    trimLeadingLineBreaks(afterP);
     headingP.parentNode.insertBefore(afterP, headingP.nextSibling);
   }
 
+  trimTrailingLineBreaks(blockEl);
   if (blockEl.textContent.trim() === "") {
     blockEl.remove();
   }
@@ -1624,18 +1698,119 @@ function splitCopyWrapAtCaret(wrap, range) {
   return true;
 }
 
+// Enterキーの挙動(5.20、2026-08-13、Mikoto要望)。
+//
+// Enter1回で「詰まった改行」、2回で「段落が変わる」。判定は状態を持たず、
+// 「カーソルの直前が<br>(=今いる行が空)なら段落を分割、そうでなければ改行を入れる」
+// という規則だけで行う。改行を入れた直後はカーソルの直前が<br>になるため、続けて
+// もう一度押すと自然に段落が分かれる(空行=段落の区切り、という5.20の規則と一致する)。
+//
 // Enterはブラウザによってkeydownの内容が異なるため、入力の種類が明示される
 // beforeinputで判定する(iOSのソフトウェアキーボード対策)。
+function caretIsOnEmptyLine(range) {
+  if (!range.collapsed) return false;
+  const node = range.startContainer;
+  if (node.nodeType === 3) {
+    // テキストノードの途中・末尾に文字があるなら空行ではない
+    if (range.startOffset > 0) return false;
+    return !!(node.previousSibling && node.previousSibling.nodeName === "BR");
+  }
+  const before = node.childNodes[range.startOffset - 1];
+  return !!(before && before.nodeName === "BR");
+}
+
+// カーソルの直前が<br>ならそれを取り除く。取り除いたらtrueを返す。
+function removeLineBreakBeforeCaret() {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return false;
+  const range = sel.getRangeAt(0);
+  const node = range.startContainer;
+  const br = node.nodeType === 3
+    ? (range.startOffset === 0 ? node.previousSibling : null)
+    : node.childNodes[range.startOffset - 1];
+  if (!br || br.nodeName !== "BR") return false;
+  br.remove();
+  return true;
+}
+
+// カーソルの直後にある行末の<br>(ブラウザが行の高さを確保するために置くもの)を取り除く。
+function removeTrailingLineBreakAfterCaret(block) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return false;
+  const range = sel.getRangeAt(0);
+  const node = range.startContainer;
+  const next = node.nodeType === 3
+    ? (range.startOffset === node.data.length ? node.nextSibling : null)
+    : node.childNodes[range.startOffset];
+  if (!next || next.nodeName !== "BR") return false;
+  if (block && block.lastChild !== next) return false;
+  next.remove();
+  return true;
+}
+
+// 空行を段落の区切りに変える。取り除くのは2つ:
+//   1つ目 … 空行そのものを作っていた<br>
+//   2つ目 … 段落が分かれると不要になる、行を終えていた<br>
+// 2つ目は、行の途中で分けるならカーソルの手前に、行末で分けるならカーソルの直後に
+// ある。これを消しておかないと、分割後の前の段落の末尾に空行が残ってしまう。
+function consumeEmptyLineBeforeCaret(block) {
+  if (!removeLineBreakBeforeCaret()) return;
+  if (!removeLineBreakBeforeCaret()) removeTrailingLineBreakAfterCaret(block);
+}
+
+// 段落を切り出したときに端に残る<br>を落とす。段落の境界では行を終える<br>は不要なため。
+// extractContentsは切れ目に中身の無いテキストノードを残すことがあるので、それも飛ばす。
+function trimEdgeLineBreaks(block, edge) {
+  while (block) {
+    const node = edge === "first" ? block.firstChild : block.lastChild;
+    if (!node) return;
+    if (node.nodeType === 3 && node.data === "") { node.remove(); continue; }
+    if (node.nodeName === "BR") { node.remove(); continue; }
+    return;
+  }
+}
+
+function trimLeadingLineBreaks(block) { trimEdgeLineBreaks(block, "first"); }
+function trimTrailingLineBreaks(block) { trimEdgeLineBreaks(block, "last"); }
+
+// 中身が空になった段落は高さが潰れるため、<br>で1行分を確保する。
+function ensureBlockHeight(block) {
+  if (block && block.childNodes.length === 0) block.appendChild(document.createElement("br"));
+}
+
+let handlingEnter = false;
+
 el.editorBody.addEventListener("beforeinput", (e) => {
   if (e.inputType !== "insertParagraph") return;
+  // execCommandはbeforeinputを再発火させるため、二重処理を防ぐ
+  if (handlingEnter) return;
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) return;
   const range = sel.getRangeAt(0);
+  if (!el.editorBody.contains(range.startContainer)) return;
+
   const wrap = findAncestorMark(range.startContainer, (n) => n.classList && n.classList.contains("cp-wrap"));
-  if (!wrap) return; // 通常の段落はブラウザ既定のまま
+  const startNewParagraph = caretIsOnEmptyLine(range);
+
   e.preventDefault();
   pushUndoSnapshot();
-  splitCopyWrapAtCaret(wrap, range);
+  handlingEnter = true;
+  try {
+    if (!startNewParagraph) {
+      document.execCommand("insertLineBreak");
+    } else {
+      const container = wrap ? wrap.querySelector(".cp-target") : closestBlock(range.startContainer);
+      consumeEmptyLineBeforeCaret(container);
+      if (wrap) {
+        splitCopyWrapAtCaret(wrap, sel.getRangeAt(0));
+      } else {
+        document.execCommand("insertParagraph");
+        ensureBlockHeight(container);
+      }
+    }
+  } finally {
+    handlingEnter = false;
+  }
   scheduleAutoRender();
 });
 
@@ -1680,6 +1855,11 @@ function copyTargetText(target) {
   return (clone.textContent || "").replace(/\n$/, "");
 }
 
+// コピー範囲1つ分をつなげたテキスト。末尾に空行が残っていても持ち出さない。
+function copyRangeText(spans) {
+  return Array.from(spans).map(copyTargetText).join(COPY_BUTTON_LINE_SEPARATOR).replace(/\s+$/, "");
+}
+
 // コピペボタンのクリックはエディタ・プレビューどちらでも動作させる(委譲リスナー)。
 // 複数段落にまたがる範囲は、同じcpidを持つ.cp-targetが複数あるため、すべて連結する。
 document.addEventListener("click", (e) => {
@@ -1690,7 +1870,7 @@ document.addEventListener("click", (e) => {
     text = btn.dataset.copyText;
   } else {
     const spans = copyScopeOf(btn).querySelectorAll(`.cp-target[data-cpid="${btn.dataset.cpid}"]`);
-    text = Array.from(spans).map(copyTargetText).join(COPY_BUTTON_LINE_SEPARATOR);
+    text = copyRangeText(spans);
   }
   copyTextToClipboard(text);
 });
@@ -2749,8 +2929,7 @@ function buildStandaloneHtml() {
   // すべて連結する(1つ目だけを埋めると、書き出し後に途中までしかコピーできない)。
   bodyClone.querySelectorAll(".cp-btn").forEach((btn) => {
     const spans = bodyClone.querySelectorAll(`.cp-target[data-cpid="${btn.dataset.cpid}"]`);
-    btn.setAttribute("data-copy-text",
-      Array.from(spans).map(copyTargetText).join(COPY_BUTTON_LINE_SEPARATOR));
+    btn.setAttribute("data-copy-text", copyRangeText(spans));
   });
 
   const toggleTree = buildToggleTree(bodyClone);
@@ -3083,7 +3262,12 @@ function convertInlineToMarkdown(node) {
         return;
       }
       const tag = child.tagName;
-      if (tag === "STRONG" || tag === "B") {
+      if (tag === "BR") {
+        // Markdownの強制改行(行末に半角スペース2つ)。段落の区切りは
+        // bodyParagraphsAsMarkdownが空行で表す(5.20)。
+        // ※Notion上での見え方は未検証。
+        out += "  \n";
+      } else if (tag === "STRONG" || tag === "B") {
         out += "**" + convertInlineToMarkdown(child) + "**";
       } else if (tag === "EM" || tag === "I") {
         out += "*" + convertInlineToMarkdown(child) + "*";
@@ -3120,7 +3304,8 @@ function renderMarkdownNode(node) {
   const bodyText = bodyParagraphsAsMarkdown(node.bodyNodes);
 
   if (node.heading) {
-    const headingText = convertInlineToMarkdown(node.heading).trim();
+    // 見出しの中に詰まった改行があっても、<summary>は1行に収める(5.20)。
+    const headingText = convertInlineToMarkdown(node.heading).replace(/\s*\n\s*/g, " ").trim();
     // 全階層をトグルリスト形式(<details><summary>、11章7番参照)で出力する。
     // 以前は最上位の見出しだけ通常の見出し4(トグルなし)にしていたが(貼り付け経由では
     // トグル見出しのショートカットが機能しなかったため)、折りたたみを優先したいとの
@@ -3147,9 +3332,11 @@ function buildMarkdownExport() {
 // 見出しは階層レベルに応じたインデントを付けて改行区切りで並べ、本文を続ける。
 // コピペボタン(<button class="cp-btn">)のラベル文字は本文ではないため、
 // textContentを取る前に取り除く。
+// 詰まった改行(<br>)はtextContentでは消えてしまうため、改行として取り出す(5.20)。
 function plainTextExcludingCopyButtons(p) {
   const clone = p.cloneNode(true);
   clone.querySelectorAll(".cp-btn").forEach((btn) => btn.remove());
+  clone.querySelectorAll("br").forEach((br) => br.replaceWith(document.createTextNode("\n")));
   return (clone.textContent || "").trim();
 }
 
@@ -3163,7 +3350,8 @@ function renderTxtNode(node) {
     .filter((n) => n.nodeType === 1 && n.tagName === "P")
     .map((p) => plainTextExcludingCopyButtons(p))
     .filter((t) => t !== "")
-    .join("\n");
+    // 段落の区切りは空行、詰まった改行は改行1つ(5.20)
+    .join("\n\n");
   if (bodyText) out += bodyText + "\n";
   node.children.forEach((child) => { out += renderTxtNode(child); });
   if (node.heading) out += "\n";
