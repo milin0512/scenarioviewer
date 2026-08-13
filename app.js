@@ -55,7 +55,7 @@ const el = {
   miniToolbar: document.getElementById("mini-toolbar"),
   btnUndo: document.getElementById("btn-undo"),
   btnFindToggle: document.getElementById("btn-find-toggle"),
-  btnRemoveEmptyLines: document.getElementById("btn-remove-empty-lines"),
+  btnInsertEmptyLine: document.getElementById("btn-insert-empty-line"),
   findBar: document.getElementById("find-bar"),
   findInput: document.getElementById("find-input"),
   btnFindRun: document.getElementById("btn-find-run"),
@@ -795,23 +795,56 @@ function buildSidebarSection(title, renderFn) {
 }
 
 /* ============================================================
- * 空行の一括削除(5章UI要望、2026-07-24)
- * 段落単位の空<p>のみを対象とし、見出しや本文が入っている段落は
- * (テキストが残るため)誤って消えないようにする。
- * サイドバーが長くなりすぎたためリボンへ移した(2026-07-27、Mikoto要望)。
+ * 空行の挿入(5.20、2026-08-13、Mikoto要望)
+ *
+ * 5.20で「空行=段落の区切り」の規則を導入し、読み込み時に空行が自動的に段落へ
+ * 変換されるようになったため、以前あった「空行の一括削除」ボタン(5章UI要望、
+ * 2026-07-24)の出番が減った。代わりに、シーンの区切りなど意図的に大きめの余白を
+ * 入れたいときのために、カーソル位置に実際の空行(空の段落)を1つ挿入するボタンに
+ * 置き換えた。
+ *
+ * 本文を分断しない非破壊的な操作にするため、文字の途中には挿入しない。カーソルが
+ * 段落の先頭にあればその段落の「前」に、それ以外の位置(段落の途中・末尾)なら
+ * その段落の「後」に、空の段落を挿入する。
  * ========================================================== */
 
-el.btnRemoveEmptyLines.addEventListener("click", () => {
-  const paragraphs = Array.from(el.editorBody.children).filter((n) => n.tagName === "P");
-  const emptyParagraphs = paragraphs.filter((p) => p.textContent.trim() === "");
-  if (emptyParagraphs.length === 0) {
-    showToast("削除できる空行はありませんでした。");
-    return;
-  }
+// 選択不要な常時押せるボタン(検索・空行挿入)なので、data-action系のボタンと違い
+// updateRibbonActionButtonsの対象外。ただしカーソル位置は必要なため、mousedownの
+// 時点で保持しておく(クリック時にはボタンへのフォーカス移動で選択が失われるため)。
+let insertEmptyLineRange = null;
+el.btnInsertEmptyLine.addEventListener("mousedown", (e) => {
+  if (e.cancelable) e.preventDefault();
+  const sel = window.getSelection();
+  insertEmptyLineRange = sel && sel.rangeCount > 0 && el.editorBody.contains(sel.getRangeAt(0).startContainer)
+    ? sel.getRangeAt(0).cloneRange()
+    : null;
+});
+
+el.btnInsertEmptyLine.addEventListener("click", () => {
+  if (!state.loaded) return;
+  const range = insertEmptyLineRange;
+  insertEmptyLineRange = null;
+
+  // カーソル位置が拾えない場合(未クリック状態からの操作など)は、本文の末尾に足す。
+  const block = range ? closestBlock(range.startContainer) : null;
+  const anchor = (block && block !== el.editorBody) ? block : el.editorBody.lastElementChild;
+  if (!anchor) return;
+
+  const insertBefore = range && anchor === closestBlock(range.startContainer) && caretIsAtBlockStart(range, anchor);
+  const blank = document.createElement(anchor.tagName === "DIV" ? "div" : "p");
+  blank.appendChild(document.createElement("br"));
+
   pushUndoSnapshot();
-  emptyParagraphs.forEach((p) => p.remove());
+  anchor.parentNode.insertBefore(blank, insertBefore ? anchor : anchor.nextSibling);
+
+  const sel = window.getSelection();
+  const caret = document.createRange();
+  caret.setStart(blank, 0);
+  caret.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(caret);
+
   scheduleAutoRender();
-  showToast(`空行を${emptyParagraphs.length}件削除しました。`);
 });
 
 /* ============================================================
@@ -1684,8 +1717,17 @@ function splitCopyWrapAtCaret(wrap, range) {
   newP.appendChild(newWrap);
   p.parentNode.insertBefore(newP, p.nextSibling);
 
-  ensureCopyTargetHeight(target);
+  // カーソルが改行の直前(文末)にあった場合、その改行がtailFragmentの先頭に
+  // 含まれてしまう。段落の境界では行を終える<br>は不要なので落とす
+  // (2026-08-13、Mikoto要望: 文末でEnterを押しても段落分けできるようにした)。
+  // 装飾タグの途中で切れると空の装飾タグが先頭に残り、<br>の除去が素通りしてしまう
+  // ため、先に空の装飾タグを消しておく(splitPlainBlockAtCaretと同じ理由)。
   const newTarget = newWrap.querySelector(".cp-target");
+  removeEmptyDecorations(newTarget);
+  trimLeadingLineBreaks(newTarget);
+  removeEmptyDecorations(target);
+  trimTrailingLineBreaks(target);
+  ensureCopyTargetHeight(target);
   ensureCopyTargetHeight(newTarget);
   syncCopyWrapChain(cpId);
 
@@ -1729,6 +1771,38 @@ function caretIsAtLineStart(range) {
   holder.querySelectorAll(".cp-btn").forEach((b) => b.remove());
   holder.querySelectorAll("br").forEach((br) => br.replaceWith(document.createTextNode("\n")));
   return /\n$/.test(holder.textContent || "");
+}
+
+// caretIsAtLineStartの逆方向版(2026-08-13、Mikoto要望)。
+//
+// 「改行の直後(次の行の先頭)」にカーソルがあるときは上のcaretIsAtLineStartが
+// 段落分けと判定するが、「改行の直前(前の行の文末)」にカーソルがあるときは
+// これまで判定対象外で、詰まった改行がもう1つ増えるだけだった(=空行が挿入される)。
+// 文末でEnterを押しても段落分けになるよう、こちらも段落分けの対象に含める。
+//
+// 段落の中の<br>を文書順に辿り、カーソル以降で最初に現れる<br>までの間に文字が
+// 無ければ「その改行の直前」と判定する(caretIsAtLineStartがカーソルより前のテキストを
+// 組み立てるのと対称に、カーソルより後ろのテキストを組み立てて判定する)。
+function caretIsRightBeforeLineBreak(range) {
+  if (!range.collapsed) return false;
+  const block = closestBlock(range.startContainer);
+  if (!block || block === el.editorBody) return false;
+  const brs = Array.from(block.querySelectorAll("br"));
+  for (const br of brs) {
+    const brStart = document.createRange();
+    brStart.setStartBefore(br);
+    // カーソルより前にある<br>(すでに通り過ぎた行の改行)は対象外
+    if (range.compareBoundaryPoints(Range.START_TO_START, brStart) > 0) continue;
+    const between = document.createRange();
+    try {
+      between.setStart(range.startContainer, range.startOffset);
+      between.setEndBefore(br);
+    } catch (err) {
+      return false;
+    }
+    return rangeTextForPosition(between) === "";
+  }
+  return false;
 }
 
 // 範囲に含まれるテキスト(コピペボタンのラベルは除く)。位置の判定に使う。
@@ -1867,12 +1941,16 @@ function splitPlainBlockAtCaret(block, range) {
 
   const newBlock = document.createElement(tagName);
   newBlock.appendChild(tailFragment);
-  trimLeadingLineBreaks(newBlock);
+  // 装飾タグ(<strong>など)の途中で分割すると、切れ目に中身の空いた装飾タグが残り、
+  // それが先頭にあると<br>の除去(trimLeadingLineBreaks)が素通りしてしまう。
+  // 先に空の装飾タグを消してから端の<br>を落とす(2026-08-13、Mikoto報告:
+  // 装飾の直後で文末Enterをすると新しい段落の先頭に空行が残っていた)。
   removeEmptyDecorations(newBlock);
+  trimLeadingLineBreaks(newBlock);
   block.parentNode.insertBefore(newBlock, block.nextSibling);
 
-  trimTrailingLineBreaks(block);
   removeEmptyDecorations(block);
+  trimTrailingLineBreaks(block);
   ensureBlockHeight(block);
   ensureBlockHeight(newBlock);
 
@@ -1892,7 +1970,7 @@ el.editorBody.addEventListener("beforeinput", (e) => {
   if (!el.editorBody.contains(range.startContainer)) return;
 
   const wrap = findAncestorMark(range.startContainer, (n) => n.classList && n.classList.contains("cp-wrap"));
-  const startNewParagraph = caretIsAtLineStart(range);
+  const startNewParagraph = caretIsAtLineStart(range) || caretIsRightBeforeLineBreak(range);
 
   e.preventDefault();
   pushUndoSnapshot();

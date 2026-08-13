@@ -35,7 +35,7 @@
        (2026-07-27、Mikoto要望)。選択範囲を必要としない操作なので data-action は付けず、
        常時押せるようにしている。狭い画面でもスクロールせず届くよう前方に置く。 -->
   <button type="button" id="btn-find-toggle" title="検索・一括置換">🔍</button>
-  <button type="button" id="btn-remove-empty-lines" title="空行をまとめて削除">空行削除</button>
+  <button type="button" id="btn-insert-empty-line" title="カーソル位置に空行を挿入">空行挿入</button>
   <span class="mini-toolbar__sep"></span>
   <button type="button" data-action="heading" title="見出しにする" disabled>見出し</button>
   <button type="button" data-action="copybtn" title="コピペボタン設置" disabled>📋+</button>
@@ -147,6 +147,6 @@
 <div class="toast" id="toast" hidden></div>
 
 <script src="vendor/pdfjs/pdf.min.js"></script>
-<script src="app.js?v=21"></script>
+<script src="app.js?v=22"></script>
 </body>
 </html>
