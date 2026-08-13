@@ -201,8 +201,34 @@ function applyLoadedParts(parts, mode) {
 // ときにカーソルが意図しない場所へ飛ぶ、という報告(2026-08-01、Mikoto)を受けて、
 // 読み込み・復元の直後に必ず通すようにした。
 // あわせて、段落に包まれていない裸のテキスト・インライン要素も<p>で包み直す。
+// iOS(WebKit)は編集中に、見た目を保つための<span style="font-size:...">を本文へ
+// 勝手に差し込む(2026-08-01、Mikotoの実機書き出しHTMLで確認。4回往復したファイルに
+// 21個混入しており、そのうち1つは中身が空だった)。
+//
+// 空の<span>は「目に見えないのにカーソルを置ける位置」を作るため、タップ位置の解決を
+// 狂わせる直接の原因になる。中身のあるものも、テキストを余計な入れ子に分断して
+// カーソルの当たり判定を不安定にする。ツール自身はクラスの無い<span>を作らない
+// (コピー範囲・見出し・検索マークはすべてクラスを持つ)ので、クラスの無い<span>は
+// 編集の痕跡と判断して外してよい。
+function hasEditingArtifacts(root) {
+  return Array.from(root.querySelectorAll("span")).some((s) => !String(s.className).trim());
+}
+
+function stripEditingArtifacts(root) {
+  Array.from(root.querySelectorAll("span"))
+    .filter((s) => !String(s.className).trim())
+    .forEach((span) => {
+      const parent = span.parentNode;
+      if (!parent) return;
+      while (span.firstChild) parent.insertBefore(span.firstChild, span);
+      span.remove();
+    });
+  root.normalize();
+}
+
 function normalizeEditorStructure() {
   const body = el.editorBody;
+  stripEditingArtifacts(body);
   let pending = [];
   const flushPending = () => {
     if (pending.length === 0) return;
@@ -224,6 +250,10 @@ function normalizeEditorStructure() {
     pending.push(node);
   });
   flushPending();
+
+  // 中身が空のコピー範囲は高さが潰れ、見えないのにカーソルを置ける位置になる。
+  // <br>で1行分を確保して、通常の空行と同じ扱いにする(2026-08-01、実機HTMLで4件確認)。
+  body.querySelectorAll(".cp-target").forEach(ensureCopyTargetHeight);
 
   // 分割されたテキストノードを結合し、余計な境界をなくす
   body.normalize();
@@ -1515,6 +1545,100 @@ function applyCopyButtonMark(range) {
   });
 }
 
+// 同じcpidを持つ.cp-wrapの並びを見直し、見た目とボタン位置を整え直す。
+// 段落の分割・結合でwrapの数が変わったあとに呼ぶ(applyCopyButtonMarkと同じ規則:
+// ボタンは最後の段落だけ、最後以外は<p>の下マージンを0にして継ぎ目を消す)。
+function syncCopyWrapChain(cpId) {
+  const wraps = Array.from(el.editorBody.querySelectorAll(`.cp-wrap[data-cpid="${cpId}"]`));
+  if (wraps.length === 0) return;
+  const last = wraps[wraps.length - 1];
+
+  wraps.forEach((w, i) => {
+    w.classList.remove("cp-wrap--first", "cp-wrap--mid", "cp-wrap--last");
+    if (wraps.length > 1) {
+      if (i === 0) w.classList.add("cp-wrap--first");
+      else if (w === last) w.classList.add("cp-wrap--last");
+      else w.classList.add("cp-wrap--mid");
+    }
+
+    const btn = w.querySelector(".cp-btn");
+    if (w === last) {
+      if (!btn) w.appendChild(buildCpButton(cpId));
+    } else if (btn) {
+      btn.remove();
+    }
+
+    const p = w.parentNode;
+    if (p && p.style) p.style.marginBottom = w === last ? "" : "0";
+  });
+}
+
+// 中身が空になった.cp-targetは高さが潰れてしまうため、<br>で1行分を確保する。
+function ensureCopyTargetHeight(target) {
+  if (!target) return;
+  if (target.childNodes.length === 0) target.appendChild(document.createElement("br"));
+}
+
+// コピー範囲の中でEnterを押したときに、通常の本文と同じく「1回で段落が変わる」
+// ようにする(2026-08-01、Mikoto報告)。
+//
+// .cp-wrapは<p>の中に入れられるよう<span>で作っている(display:blockで見た目だけ
+// ブロックにしている。applyCopyButtonMarkのコメント参照)。そのためブラウザはEnterで
+// <p>を分割せず<br>を入れてしまい、通常の本文では1回で段落が変わるのに、コピー範囲の
+// 中では2回押さないと変わらない、という食い違いが起きていた。さらに<br>はコピー時の
+// テキストに改行として現れないため、貼り付けたときの空行の数も不揃いになっていた。
+// ここで段落の分割を自前で行い、複数段落のコピー範囲と同じ構造(段落ごとに1つの
+// .cp-wrapを持ち、同じcpidを共有する)に揃える。
+function splitCopyWrapAtCaret(wrap, range) {
+  const target = wrap.querySelector(".cp-target");
+  if (!target) return false;
+  const p = wrap.parentNode;
+  if (!p || p.parentNode !== el.editorBody) return false;
+  if (!target.contains(range.startContainer) && range.startContainer !== target) return false;
+
+  const cpId = wrap.dataset.cpid;
+  if (!range.collapsed) range.deleteContents();
+
+  // カーソル位置から.cp-targetの末尾までを新しい段落へ移す
+  const tail = document.createRange();
+  tail.setStart(range.startContainer, range.startOffset);
+  tail.setEnd(target, target.childNodes.length);
+  const tailFragment = tail.extractContents();
+
+  const newP = document.createElement(p.tagName === "DIV" ? "div" : "p");
+  const newWrap = wrapAsCpTarget(tailFragment, cpId);
+  newP.appendChild(newWrap);
+  p.parentNode.insertBefore(newP, p.nextSibling);
+
+  ensureCopyTargetHeight(target);
+  const newTarget = newWrap.querySelector(".cp-target");
+  ensureCopyTargetHeight(newTarget);
+  syncCopyWrapChain(cpId);
+
+  const sel = window.getSelection();
+  const caret = document.createRange();
+  caret.setStart(newTarget, 0);
+  caret.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(caret);
+  return true;
+}
+
+// Enterはブラウザによってkeydownの内容が異なるため、入力の種類が明示される
+// beforeinputで判定する(iOSのソフトウェアキーボード対策)。
+el.editorBody.addEventListener("beforeinput", (e) => {
+  if (e.inputType !== "insertParagraph") return;
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
+  const range = sel.getRangeAt(0);
+  const wrap = findAncestorMark(range.startContainer, (n) => n.classList && n.classList.contains("cp-wrap"));
+  if (!wrap) return; // 通常の段落はブラウザ既定のまま
+  e.preventDefault();
+  pushUndoSnapshot();
+  splitCopyWrapAtCaret(wrap, range);
+  scheduleAutoRender();
+});
+
 // プレビューは本文を複製して作られるため、同じcpidを持つ要素は編集エリアと
 // プレビューの両方に存在しうる。document全体から拾うと同じ範囲を二重に数えて
 // しまうので、探索範囲は必ず操作対象のエリア内に限定する
@@ -1548,6 +1672,14 @@ function removeCopyButtonMark(wrapperEl) {
 // (本文を手でコピーする場合は逆に改行1つ。上のselectionToPlainText参照)
 const COPY_BUTTON_LINE_SEPARATOR = "\n\n";
 
+// コピー範囲1つ分のテキスト。Shift+Enterや、以前のバージョンで作られた文書に残る
+// <br>は、textContentでは消えてしまうため改行として扱う(2026-08-01)。
+function copyTargetText(target) {
+  const clone = target.cloneNode(true);
+  clone.querySelectorAll("br").forEach((br) => br.replaceWith(document.createTextNode("\n")));
+  return (clone.textContent || "").replace(/\n$/, "");
+}
+
 // コピペボタンのクリックはエディタ・プレビューどちらでも動作させる(委譲リスナー)。
 // 複数段落にまたがる範囲は、同じcpidを持つ.cp-targetが複数あるため、すべて連結する。
 document.addEventListener("click", (e) => {
@@ -1558,7 +1690,7 @@ document.addEventListener("click", (e) => {
     text = btn.dataset.copyText;
   } else {
     const spans = copyScopeOf(btn).querySelectorAll(`.cp-target[data-cpid="${btn.dataset.cpid}"]`);
-    text = Array.from(spans).map((s) => s.textContent).join(COPY_BUTTON_LINE_SEPARATOR);
+    text = Array.from(spans).map(copyTargetText).join(COPY_BUTTON_LINE_SEPARATOR);
   }
   copyTextToClipboard(text);
 });
@@ -2609,6 +2741,8 @@ function buildStandaloneHtml() {
   clearSearchHighlights();
 
   const bodyClone = el.editorBody.cloneNode(true);
+  // iOSが編集中に差し込む<span>は書き出しにも持ち込まない(5.18)。
+  stripEditingArtifacts(bodyClone);
   // コピペボタンの対象テキストを data-copy-text に埋め込み、
   // 書き出し後の単体HTMLだけでもクリップボードコピーが動くようにする。
   // 複数段落にまたがる範囲は同じcpidの.cp-targetが段落の数だけ存在するため、
@@ -2616,7 +2750,7 @@ function buildStandaloneHtml() {
   bodyClone.querySelectorAll(".cp-btn").forEach((btn) => {
     const spans = bodyClone.querySelectorAll(`.cp-target[data-cpid="${btn.dataset.cpid}"]`);
     btn.setAttribute("data-copy-text",
-      Array.from(spans).map((s) => s.textContent).join(COPY_BUTTON_LINE_SEPARATOR));
+      Array.from(spans).map(copyTargetText).join(COPY_BUTTON_LINE_SEPARATOR));
   });
 
   const toggleTree = buildToggleTree(bodyClone);
@@ -2640,7 +2774,8 @@ function buildStandaloneHtml() {
     schemaVersion: SCHEMA_VERSION,
     savedAt,
     sourceFileName: state.meta.sourceFileName || null,
-    bodyHtml: el.editorBody.innerHTML,
+    // 再読み込み用の本文も、検索マークとiOSの編集痕跡を取り除いた状態で保存する。
+    bodyHtml: currentBodyHtmlForSave(),
     npcs: state.npcs,
   };
   const jsonText = JSON.stringify(jsonData, null, 2).replace(/</g, "\\u003c");
@@ -3276,9 +3411,10 @@ const AUTOSAVE_DELAY_MS = 3000;
 // 検索マーク(.search-hit)は表示用の一時的なもので、書き出しにも含めていない(5.16)。
 // 実行中の検索を邪魔しないよう、複製した側から取り除いてから保存する。
 function currentBodyHtmlForSave() {
-  // 検索マークが無いときが大半なので、その場合は複製せずそのまま返す
+  // 検索マークもiOSの編集痕跡も無いときが大半なので、その場合は複製せずそのまま返す
   // (長いシナリオでは本文全体の複製が数秒おきの負荷になるため。2026-08-01)。
-  if (!el.editorBody.querySelector(".search-hit")) return el.editorBody.innerHTML;
+  const needsClean = el.editorBody.querySelector(".search-hit") || hasEditingArtifacts(el.editorBody);
+  if (!needsClean) return el.editorBody.innerHTML;
   const clone = el.editorBody.cloneNode(true);
   clone.querySelectorAll(".search-hit").forEach((mark) => {
     const parent = mark.parentNode;
