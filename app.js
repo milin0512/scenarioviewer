@@ -1952,15 +1952,59 @@ el.editorBody.addEventListener("beforeinput", (e) => {
 
   e.preventDefault();
   pushUndoSnapshot();
+  mergeBlocks(prev, block);
+  scheduleAutoRender();
+});
 
-  // 見出し・コピー範囲の段落に結合するときは、その内側に入れる。段落の外に置くと
-  // 「見出しは段落まるごと」(5.4)・コピー範囲の構造(5.12)が崩れるため。
-  const target = mergeTargetOf(prev);
-  // 末尾にある高さ確保用の<br>は、結合すると余計な空行になるので落とす
+// 段落を結合するときの受け入れ先を決め、実際にblockの中身をprevへ移す。
+//
+// 見出し・コピー範囲の「ラベル部分」(h-mark・cp-target)へ入れてよいのは、
+// 移す内容が装飾やプレーンテキストだけのとき(Wordで見出し直後の段落を消すと
+// 見出し行に文章が続くのと同じ挙動)に限る。移す内容自体に見出しやコピー範囲が
+// 含まれる場合にラベルの中へ入れると、コピー範囲が入れ子になってしまう
+// (2026-08-13、Mikoto報告: Enterで段落分けしたコピー範囲をバックスペースで
+// 削除すると入れ子構造になる不具合)。この場合は段落(<p>)そのものに連結し、
+// 見出し・コピー範囲は兄弟要素として並べる。
+function mergeBlocks(prev, block) {
+  const blockHasStructuralMark = !!(block.querySelector(".h-mark") || block.querySelector(".cp-wrap"));
+
+  // 特例: Enterで段落分けしたコピー範囲(同じcpidの.cp-wrapが前後に分かれている)を
+  // バックスペースで結合する場合は、分割前の1つのコピー範囲に戻す。
+  const prevWrap = lastElementIfMatches(prev, "cp-wrap");
+  const blockWrap = firstElementIfMatches(block, "cp-wrap");
+  if (prevWrap && blockWrap && prevWrap.dataset.cpid === blockWrap.dataset.cpid
+      && block.children.length === 1 && (block.textContent || "").trim() === blockWrap.textContent.trim()) {
+    const prevTarget = prevWrap.querySelector(".cp-target");
+    const nextTarget = blockWrap.querySelector(".cp-target");
+    trimTrailingLineBreaks(prevTarget);
+    const caretOffset = (prevTarget.textContent || "").length;
+    trimLeadingLineBreaks(nextTarget);
+    while (nextTarget.firstChild) prevTarget.appendChild(nextTarget.firstChild);
+    // 移ってきた側にボタンがあれば、それを残す(元々あった側のボタンは重複するので消す)
+    const newBtn = blockWrap.querySelector(".cp-btn");
+    if (newBtn) {
+      const oldBtn = prevWrap.querySelector(".cp-btn");
+      if (oldBtn) oldBtn.remove();
+      prevWrap.appendChild(newBtn);
+    }
+    ensureBlockHeight(prevTarget);
+    block.remove();
+    syncCopyWrapChain(prevWrap.dataset.cpid);
+    placeCaretAtOffset(prevTarget, caretOffset);
+    return;
+  }
+
+  // 通常の結合。移す内容に見出し・コピー範囲が含まれないときだけ、ラベルの中へ入れる。
+  const last = prev.lastElementChild;
+  const target = !blockHasStructuralMark && last && last.classList
+    ? (last.classList.contains("h-mark") ? last
+      : last.classList.contains("cp-wrap") ? (last.querySelector(".cp-target") || prev)
+      : prev)
+    : prev;
+
   trimTrailingLineBreaks(target);
   const caretOffset = (target.textContent || "").length;
   const isEmpty = (block.textContent || "").trim() === "";
-
   if (!isEmpty) {
     trimLeadingLineBreaks(block);
     while (block.firstChild) target.appendChild(block.firstChild);
@@ -1968,23 +2012,25 @@ el.editorBody.addEventListener("beforeinput", (e) => {
   block.remove();
   ensureBlockHeight(target);
   target.normalize();
+  placeCaretAtOffset(target, caretOffset);
+}
 
-  const restored = offsetsToRange(target, { start: caretOffset, end: caretOffset });
-  if (restored) {
-    sel.removeAllRanges();
-    sel.addRange(restored);
-  }
-  scheduleAutoRender();
-});
-
-// 段落を結合するときの受け入れ先。見出し・コピー範囲は、その内側に入れる。
-function mergeTargetOf(block) {
+function lastElementIfMatches(block, className) {
   const last = block.lastElementChild;
-  if (last && last.classList) {
-    if (last.classList.contains("h-mark")) return last;
-    if (last.classList.contains("cp-wrap")) return last.querySelector(".cp-target") || block;
-  }
-  return block;
+  return last && last.classList && last.classList.contains(className) ? last : null;
+}
+
+function firstElementIfMatches(block, className) {
+  const first = block.firstElementChild;
+  return first && first.classList && first.classList.contains(className) ? first : null;
+}
+
+function placeCaretAtOffset(container, offset) {
+  const restored = offsetsToRange(container, { start: offset, end: offset });
+  if (!restored) return;
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(restored);
 }
 
 // プレビューは本文を複製して作られるため、同じcpidを持つ要素は編集エリアと
