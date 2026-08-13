@@ -1827,12 +1827,65 @@ function ensureBlockHeight(block) {
   if (block && block.childNodes.length === 0) block.appendChild(document.createElement("br"));
 }
 
-let handlingEnter = false;
+// 詰まった改行(<br>)の挿入。コピー範囲(.cp-wrap)はCSSでdisplay:blockにした<span>で
+// 作っている(見た目だけブロックにする実装、5.12参照)ため、ブラウザ純正の
+// execCommand("insertLineBreak")に任せると、この「タグはspanだが見た目はblock」という
+// 食い違いをどう扱うかがブラウザの内部判断に委ねられ、.cp-wrapが入れ子に複製される
+// ことがあった(2026-08-13、Mikoto報告。「エンター一回の改行操作でコピペボタンが
+// 入れ子構造になる」)。ブラウザの挙動に依存しないよう、<br>の挿入をRange APIで
+// 自前で行うようにした(段落分割を自前で行っているsplitCopyWrapAtCaret/
+// applyHeadingMarkと同じ方針)。
+function insertLineBreakAtCaret(range) {
+  if (!range.collapsed) range.deleteContents();
+  const br = document.createElement("br");
+  range.insertNode(br);
+
+  // 行の末尾に改行を入れた場合、その後に何も続かないと1行分の高さが確保されない
+  // (ブラウザの表示上の性質)。もう1つ<br>を続けて高さを保つが、カーソルは
+  // 最初のbrの直後(=新しい行の先頭)に置く。
+  if (!br.nextSibling) {
+    br.parentNode.insertBefore(document.createElement("br"), br.nextSibling);
+  }
+
+  const sel = window.getSelection();
+  const caret = document.createRange();
+  caret.setStartAfter(br);
+  caret.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(caret);
+}
+
+// 段落の分割(コピー範囲でない通常の本文)。splitCopyWrapAtCaretと同じ考え方で、
+// カーソル位置から段落末尾までを新しい段落へ切り出す。native execCommandに
+// 頼らないことで、上記のコピー範囲と同じくブラウザの内部判断のばらつきを避ける。
+function splitPlainBlockAtCaret(block, range) {
+  const tagName = block.tagName === "DIV" ? "div" : "p";
+  const tail = document.createRange();
+  tail.setStart(range.startContainer, range.startOffset);
+  tail.setEnd(block, block.childNodes.length);
+  const tailFragment = tail.extractContents();
+
+  const newBlock = document.createElement(tagName);
+  newBlock.appendChild(tailFragment);
+  trimLeadingLineBreaks(newBlock);
+  removeEmptyDecorations(newBlock);
+  block.parentNode.insertBefore(newBlock, block.nextSibling);
+
+  trimTrailingLineBreaks(block);
+  removeEmptyDecorations(block);
+  ensureBlockHeight(block);
+  ensureBlockHeight(newBlock);
+
+  const sel = window.getSelection();
+  const caret = document.createRange();
+  caret.setStart(newBlock, 0);
+  caret.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(caret);
+}
 
 el.editorBody.addEventListener("beforeinput", (e) => {
   if (e.inputType !== "insertParagraph") return;
-  // execCommandはbeforeinputを再発火させるため、二重処理を防ぐ
-  if (handlingEnter) return;
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) return;
   const range = sel.getRangeAt(0);
@@ -1843,25 +1896,16 @@ el.editorBody.addEventListener("beforeinput", (e) => {
 
   e.preventDefault();
   pushUndoSnapshot();
-  handlingEnter = true;
-  try {
-    if (!startNewParagraph) {
-      document.execCommand("insertLineBreak");
+  if (!startNewParagraph) {
+    insertLineBreakAtCaret(range);
+  } else {
+    const container = wrap ? wrap.querySelector(".cp-target") : closestBlock(range.startContainer);
+    consumeLineBreaksBeforeCaret(container);
+    if (wrap) {
+      splitCopyWrapAtCaret(wrap, sel.getRangeAt(0));
     } else {
-      const container = wrap ? wrap.querySelector(".cp-target") : closestBlock(range.startContainer);
-      consumeLineBreaksBeforeCaret(container);
-      if (wrap) {
-        splitCopyWrapAtCaret(wrap, sel.getRangeAt(0));
-      } else {
-        document.execCommand("insertParagraph");
-        removeEmptyDecorations(container);
-        removeEmptyDecorations(container.nextElementSibling);
-        trimTrailingLineBreaks(container);
-        ensureBlockHeight(container);
-      }
+      splitPlainBlockAtCaret(container, sel.getRangeAt(0));
     }
-  } finally {
-    handlingEnter = false;
   }
   scheduleAutoRender();
 });
