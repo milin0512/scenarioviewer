@@ -1698,64 +1698,113 @@ function splitCopyWrapAtCaret(wrap, range) {
   return true;
 }
 
-// Enterキーの挙動(5.20、2026-08-13、Mikoto要望)。
+// Enterキーの挙動(5.20、2026-08-13、Mikoto要望。判定方法は2026-08-13に作り直した)。
 //
-// Enter1回で「詰まった改行」、2回で「段落が変わる」。判定は状態を持たず、
-// 「カーソルの直前が<br>(=今いる行が空)なら段落を分割、そうでなければ改行を入れる」
-// という規則だけで行う。改行を入れた直後はカーソルの直前が<br>になるため、続けて
-// もう一度押すと自然に段落が分かれる(空行=段落の区切り、という5.20の規則と一致する)。
+// Enter1回で「詰まった改行」、2回で「段落が変わる」。判定は状態やキーの連打間隔に
+// 頼らず、「カーソルが行の先頭にいるか」だけで決める。行の先頭にいるということは、
+// 直前の行が改行で終わっている状態なので、その改行を段落の区切りに変える。
+// これにより、あとから改行の位置にカーソルを置いてEnterを1回押すだけでも段落分けに
+// できる(Mikoto要望)。
+//
+// 以前は「カーソルの直前のノードが<br>か」で見ていたが、カーソルが装飾やコピー範囲の
+// 内側に入っていると隣接ノードが<br>にならず、段落が分かれたり分かれなかったりする
+// 原因になっていた(2026-08-13、Mikoto報告)。段落の先頭からカーソルまでのテキストを
+// 組み立てて、改行で終わっているかで判定する方式に変えて安定させた。
 //
 // Enterはブラウザによってkeydownの内容が異なるため、入力の種類が明示される
 // beforeinputで判定する(iOSのソフトウェアキーボード対策)。
-function caretIsOnEmptyLine(range) {
+function caretIsAtLineStart(range) {
   if (!range.collapsed) return false;
-  const node = range.startContainer;
-  if (node.nodeType === 3) {
-    // テキストノードの途中・末尾に文字があるなら空行ではない
-    if (range.startOffset > 0) return false;
-    return !!(node.previousSibling && node.previousSibling.nodeName === "BR");
+  const block = closestBlock(range.startContainer);
+  if (!block || block === el.editorBody) return false;
+  const head = document.createRange();
+  head.selectNodeContents(block);
+  try {
+    head.setEnd(range.startContainer, range.startOffset);
+  } catch (err) {
+    return false;
   }
-  const before = node.childNodes[range.startOffset - 1];
-  return !!(before && before.nodeName === "BR");
+  const holder = document.createElement("div");
+  holder.appendChild(head.cloneContents());
+  holder.querySelectorAll(".cp-btn").forEach((b) => b.remove());
+  holder.querySelectorAll("br").forEach((br) => br.replaceWith(document.createTextNode("\n")));
+  return /\n$/.test(holder.textContent || "");
 }
 
-// カーソルの直前が<br>ならそれを取り除く。取り除いたらtrueを返す。
-function removeLineBreakBeforeCaret() {
+// 範囲に含まれるテキスト(コピペボタンのラベルは除く)。位置の判定に使う。
+function rangeTextForPosition(range) {
+  const holder = document.createElement("div");
+  holder.appendChild(range.cloneContents());
+  holder.querySelectorAll(".cp-btn").forEach((b) => b.remove());
+  return holder.textContent || "";
+}
+
+// カーソルの直前にある<br>を取り除く。装飾やコピー範囲の内側にカーソルがあると
+// 隣接ノードでは見つからないため、段落の中の<br>を文書順に辿って探す。
+function removeLineBreakBeforeCaret(block) {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) return false;
   const range = sel.getRangeAt(0);
-  const node = range.startContainer;
-  const br = node.nodeType === 3
-    ? (range.startOffset === 0 ? node.previousSibling : null)
-    : node.childNodes[range.startOffset - 1];
-  if (!br || br.nodeName !== "BR") return false;
-  br.remove();
-  return true;
+  const brs = Array.from(block.querySelectorAll("br"));
+  for (let i = brs.length - 1; i >= 0; i--) {
+    const br = brs[i];
+    const ref = document.createRange();
+    ref.setStartBefore(br);
+    // カーソルより後ろの<br>は対象外
+    if (range.compareBoundaryPoints(Range.START_TO_START, ref) <= 0) continue;
+    // <br>とカーソルの間に文字があるなら、それは前の行の改行なので触らない
+    const between = document.createRange();
+    between.setStartAfter(br);
+    try { between.setEnd(range.startContainer, range.startOffset); } catch (err) { return false; }
+    if (rangeTextForPosition(between) !== "") return false;
+    br.remove();
+    return true;
+  }
+  return false;
 }
 
-// カーソルの直後にある行末の<br>(ブラウザが行の高さを確保するために置くもの)を取り除く。
-function removeTrailingLineBreakAfterCaret(block) {
+// カーソルから段落の終わりまでに文字が無いとき、そこに残る<br>(ブラウザが行の高さを
+// 確保するために置くもの)を取り除く。
+function removeTrailingLineBreaksAfterCaret(block) {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) return false;
   const range = sel.getRangeAt(0);
-  const node = range.startContainer;
-  const next = node.nodeType === 3
-    ? (range.startOffset === node.data.length ? node.nextSibling : null)
-    : node.childNodes[range.startOffset];
-  if (!next || next.nodeName !== "BR") return false;
-  if (block && block.lastChild !== next) return false;
-  next.remove();
-  return true;
+  const tail = document.createRange();
+  try {
+    tail.setStart(range.startContainer, range.startOffset);
+    tail.selectNodeContents(block);
+    tail.setStart(range.startContainer, range.startOffset);
+  } catch (err) {
+    return false;
+  }
+  if (rangeTextForPosition(tail) !== "") return false;
+  let removed = false;
+  Array.from(block.querySelectorAll("br")).forEach((br) => {
+    const ref = document.createRange();
+    ref.setStartBefore(br);
+    if (range.compareBoundaryPoints(Range.START_TO_START, ref) > 0) return; // カーソルより前
+    br.remove();
+    removed = true;
+  });
+  return removed;
 }
 
-// 空行を段落の区切りに変える。取り除くのは2つ:
-//   1つ目 … 空行そのものを作っていた<br>
-//   2つ目 … 段落が分かれると不要になる、行を終えていた<br>
-// 2つ目は、行の途中で分けるならカーソルの手前に、行末で分けるならカーソルの直後に
-// ある。これを消しておかないと、分割後の前の段落の末尾に空行が残ってしまう。
-function consumeEmptyLineBeforeCaret(block) {
-  if (!removeLineBreakBeforeCaret()) return;
-  if (!removeLineBreakBeforeCaret()) removeTrailingLineBreakAfterCaret(block);
+// 改行を段落の区切りに変える。カーソルの手前に続く<br>はすべて段落の区切りに
+// 吸収されるので取り除く。行末で分ける場合は、ブラウザが高さ確保のために置いた
+// カーソル以降の<br>も落とす。これを消さないと分割後の前の段落に空行が残る。
+function consumeLineBreaksBeforeCaret(block) {
+  let removed = false;
+  while (removeLineBreakBeforeCaret(block)) removed = true;
+  if (removed) removeTrailingLineBreaksAfterCaret(block);
+  return removed;
+}
+
+// 段落を分けたあとに残る、中身の無い装飾タグを取り除く。
+function removeEmptyDecorations(block) {
+  if (!block) return;
+  block.querySelectorAll("strong, em, u, b, i").forEach((n) => {
+    if (n.childNodes.length === 0 || (n.textContent === "" && !n.querySelector("br"))) n.remove();
+  });
 }
 
 // 段落を切り出したときに端に残る<br>を落とす。段落の境界では行を終える<br>は不要なため。
@@ -1790,7 +1839,7 @@ el.editorBody.addEventListener("beforeinput", (e) => {
   if (!el.editorBody.contains(range.startContainer)) return;
 
   const wrap = findAncestorMark(range.startContainer, (n) => n.classList && n.classList.contains("cp-wrap"));
-  const startNewParagraph = caretIsOnEmptyLine(range);
+  const startNewParagraph = caretIsAtLineStart(range);
 
   e.preventDefault();
   pushUndoSnapshot();
@@ -1800,11 +1849,14 @@ el.editorBody.addEventListener("beforeinput", (e) => {
       document.execCommand("insertLineBreak");
     } else {
       const container = wrap ? wrap.querySelector(".cp-target") : closestBlock(range.startContainer);
-      consumeEmptyLineBeforeCaret(container);
+      consumeLineBreaksBeforeCaret(container);
       if (wrap) {
         splitCopyWrapAtCaret(wrap, sel.getRangeAt(0));
       } else {
         document.execCommand("insertParagraph");
+        removeEmptyDecorations(container);
+        removeEmptyDecorations(container.nextElementSibling);
+        trimTrailingLineBreaks(container);
         ensureBlockHeight(container);
       }
     }
@@ -1813,6 +1865,83 @@ el.editorBody.addEventListener("beforeinput", (e) => {
   }
   scheduleAutoRender();
 });
+
+// 段落の区切りを消せるようにする(5.20、2026-08-13、Mikoto報告)。
+//
+// 段落の先頭でバックスペースを押したときのブラウザ既定の動作には2つ問題があった。
+//   1. 空の段落にいるときは、その段落を消すだけで前後の段落は分かれたまま残るため、
+//      作った段落の区切りを消す手段が無かった。
+//   2. 段落どうしを結合するとき、Blinkが<span style="font-size: 0.95rem;">を
+//      本文に差し込む。これは5.18で除去対象にしているiOSの編集痕跡と同じもので、
+//      放っておくとカーソルの当たり判定を乱す原因になる(実測で確認)。
+// そのため、段落の先頭での削除は自前で行い、前の段落へきれいに結合する。
+function caretIsAtBlockStart(range, block) {
+  if (!range.collapsed || !block) return false;
+  const head = document.createRange();
+  head.selectNodeContents(block);
+  try {
+    head.setEnd(range.startContainer, range.startOffset);
+  } catch (err) {
+    return false;
+  }
+  const holder = document.createElement("div");
+  holder.appendChild(head.cloneContents());
+  holder.querySelectorAll(".cp-btn").forEach((b) => b.remove());
+  // 段落の先頭にある<br>は文字ではないので、位置の判定では無視する
+  holder.querySelectorAll("br").forEach((br) => br.remove());
+  return (holder.textContent || "") === "";
+}
+
+el.editorBody.addEventListener("beforeinput", (e) => {
+  if (e.inputType !== "deleteContentBackward") return;
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
+  const range = sel.getRangeAt(0);
+  if (!range.collapsed || !el.editorBody.contains(range.startContainer)) return;
+
+  const block = closestBlock(range.startContainer);
+  if (!block || block === el.editorBody) return;
+  if (!caretIsAtBlockStart(range, block)) return; // 行の途中・行頭の改行削除は既定のまま
+
+  const prev = block.previousElementSibling;
+  if (!prev || (prev.tagName !== "P" && prev.tagName !== "DIV")) return;
+
+  e.preventDefault();
+  pushUndoSnapshot();
+
+  // 見出し・コピー範囲の段落に結合するときは、その内側に入れる。段落の外に置くと
+  // 「見出しは段落まるごと」(5.4)・コピー範囲の構造(5.12)が崩れるため。
+  const target = mergeTargetOf(prev);
+  // 末尾にある高さ確保用の<br>は、結合すると余計な空行になるので落とす
+  trimTrailingLineBreaks(target);
+  const caretOffset = (target.textContent || "").length;
+  const isEmpty = (block.textContent || "").trim() === "";
+
+  if (!isEmpty) {
+    trimLeadingLineBreaks(block);
+    while (block.firstChild) target.appendChild(block.firstChild);
+  }
+  block.remove();
+  ensureBlockHeight(target);
+  target.normalize();
+
+  const restored = offsetsToRange(target, { start: caretOffset, end: caretOffset });
+  if (restored) {
+    sel.removeAllRanges();
+    sel.addRange(restored);
+  }
+  scheduleAutoRender();
+});
+
+// 段落を結合するときの受け入れ先。見出し・コピー範囲は、その内側に入れる。
+function mergeTargetOf(block) {
+  const last = block.lastElementChild;
+  if (last && last.classList) {
+    if (last.classList.contains("h-mark")) return last;
+    if (last.classList.contains("cp-wrap")) return last.querySelector(".cp-target") || block;
+  }
+  return block;
+}
 
 // プレビューは本文を複製して作られるため、同じcpidを持つ要素は編集エリアと
 // プレビューの両方に存在しうる。document全体から拾うと同じ範囲を二重に数えて
