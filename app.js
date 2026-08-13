@@ -164,6 +164,7 @@ function applyLoadedParts(parts, mode) {
     // 追加読み込みは「元に戻す」で取り消せるようにする(2026-07-27)。
     pushUndoSnapshot();
     el.editorBody.innerHTML = el.editorBody.innerHTML + "\n" + html;
+    normalizeEditorStructure();
     state.npcs = state.npcs.concat(npcs);
     state.meta.sourceFileName = state.meta.sourceFileName
       ? `${state.meta.sourceFileName} / ${names}`
@@ -178,6 +179,7 @@ function applyLoadedParts(parts, mode) {
   }
 
   el.editorBody.innerHTML = html;
+  normalizeEditorStructure();
   // 本ツールで書き出したHTMLが含まれる場合は、その保存情報を引き継ぐ(複数ある場合は最初のもの)。
   const exported = parts.find((p) => p.meta);
   state.meta = {
@@ -189,6 +191,42 @@ function applyLoadedParts(parts, mode) {
   const kindLabel = parts.length > 1 ? `${parts.length}ファイルを連結` : parts[0].kind;
   finishLoad(names, kindLabel);
   adoptStoredHandleForNames(parts.map((p) => p.fileName));
+}
+
+// 本文の直下を「ブロック要素だけ」の状態に整える(2026-08-01)。
+//
+// 段落を"\n"でつないだHTMLをinnerHTMLに流し込むと、<p>と<p>の間に改行だけのテキスト
+// ノードが残る。見た目には影響しないが、これは段落のどこにも属さない編集可能な位置
+// であり、タップ位置の解決を不安定にする要因になる。iPhoneで編集した内容を復元した
+// ときにカーソルが意図しない場所へ飛ぶ、という報告(2026-08-01、Mikoto)を受けて、
+// 読み込み・復元の直後に必ず通すようにした。
+// あわせて、段落に包まれていない裸のテキスト・インライン要素も<p>で包み直す。
+function normalizeEditorStructure() {
+  const body = el.editorBody;
+  let pending = [];
+  const flushPending = () => {
+    if (pending.length === 0) return;
+    const p = document.createElement("p");
+    pending[0].parentNode.insertBefore(p, pending[0]);
+    pending.forEach((n) => p.appendChild(n));
+    pending = [];
+  };
+
+  Array.from(body.childNodes).forEach((node) => {
+    if (node.nodeType === 3) {
+      // 空白だけのテキストノードは捨てる(段落の外にある意味のない編集位置)
+      if (!node.data.trim()) { node.remove(); return; }
+      pending.push(node);
+      return;
+    }
+    if (node.nodeType !== 1) { node.remove(); return; }
+    if (node.tagName === "P" || node.tagName === "DIV") { flushPending(); return; }
+    pending.push(node);
+  });
+  flushPending();
+
+  // 分割されたテキストノードを結合し、余計な境界をなくす
+  body.normalize();
 }
 
 function plainTextToParagraphsHtml(text) {
@@ -1043,6 +1081,48 @@ el.editorBody.addEventListener("paste", (e) => {
   scheduleAutoRender();
 });
 
+// 本文内でのコピー・切り取り(2026-08-01、Mikoto報告への対応)。
+//
+// ブラウザ既定のプレーンテキスト化では、段落(<p>)の区切りが改行2つとして書き出される。
+// 本ツールは1行を1つの<p>で表しているため、本文内でコピーして貼り付けると、元には
+// なかった空行が行ごとに挟まってしまう(メモアプリなど、改行1つで渡してくるアプリから
+// 貼り付けたときは正常だった)。そこで、コピー時のプレーンテキストを自分で組み立て、
+// 段落の区切りを改行1つにして、コピー元と同じ見た目で貼り付くようにする。
+function selectionToPlainText(range) {
+  const holder = document.createElement("div");
+  holder.appendChild(range.cloneContents());
+  // コピペボタンのラベル(「📋コピー」)は本文ではないので持ち出さない。
+  holder.querySelectorAll(".cp-btn").forEach((btn) => btn.remove());
+  holder.querySelectorAll("br").forEach((br) => br.replaceWith(document.createTextNode("\n")));
+
+  const blocks = Array.from(holder.children).filter((n) => n.tagName === "P" || n.tagName === "DIV");
+  // 段落をまたがない選択(1つの段落の内側だけ)は、そのまま文字列にする。
+  if (blocks.length === 0) return holder.textContent.replace(/\n$/, "");
+  // 末尾の<br>はブラウザが高さ確保のために置くものなので、行の終わりの改行は落とす。
+  return blocks.map((b) => b.textContent.replace(/\n$/, "")).join("\n");
+}
+
+function writeSelectionAsPlainText(e) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+  const range = sel.getRangeAt(0);
+  if (!el.editorBody.contains(range.commonAncestorContainer)) return null;
+  if (!e.clipboardData) return null;
+  e.clipboardData.setData("text/plain", selectionToPlainText(range));
+  e.preventDefault();
+  return range;
+}
+
+el.editorBody.addEventListener("copy", writeSelectionAsPlainText);
+
+el.editorBody.addEventListener("cut", (e) => {
+  if (!writeSelectionAsPlainText(e)) return;
+  // 既定の切り取りを止めた分、削除は自前で行う。段落構造の扱いはブラウザに任せる。
+  pushUndoSnapshot();
+  document.execCommand("delete");
+  scheduleAutoRender();
+});
+
 // 検索マークを外すタイミング(2026-08-01に見直し)。
 //
 // 以前はmousedown/touchstart/keydownで外していたが、これはタップの最中に本文のDOMを
@@ -1462,6 +1542,12 @@ function removeCopyButtonMark(wrapperEl) {
   });
 }
 
+// コピペボタンで複数段落をコピーしたときの行の区切り(2026-08-01、Mikoto要望)。
+// ココフォリアなどに貼り付けたときの見た目を、ツール上の表示に近づけるため、
+// 行の間に空行が入るよう改行2つでつなぐ。
+// (本文を手でコピーする場合は逆に改行1つ。上のselectionToPlainText参照)
+const COPY_BUTTON_LINE_SEPARATOR = "\n\n";
+
 // コピペボタンのクリックはエディタ・プレビューどちらでも動作させる(委譲リスナー)。
 // 複数段落にまたがる範囲は、同じcpidを持つ.cp-targetが複数あるため、すべて連結する。
 document.addEventListener("click", (e) => {
@@ -1472,7 +1558,7 @@ document.addEventListener("click", (e) => {
     text = btn.dataset.copyText;
   } else {
     const spans = copyScopeOf(btn).querySelectorAll(`.cp-target[data-cpid="${btn.dataset.cpid}"]`);
-    text = Array.from(spans).map((s) => s.textContent).join("\n");
+    text = Array.from(spans).map((s) => s.textContent).join(COPY_BUTTON_LINE_SEPARATOR);
   }
   copyTextToClipboard(text);
 });
@@ -2529,7 +2615,8 @@ function buildStandaloneHtml() {
   // すべて連結する(1つ目だけを埋めると、書き出し後に途中までしかコピーできない)。
   bodyClone.querySelectorAll(".cp-btn").forEach((btn) => {
     const spans = bodyClone.querySelectorAll(`.cp-target[data-cpid="${btn.dataset.cpid}"]`);
-    btn.setAttribute("data-copy-text", Array.from(spans).map((s) => s.textContent).join("\n"));
+    btn.setAttribute("data-copy-text",
+      Array.from(spans).map((s) => s.textContent).join(COPY_BUTTON_LINE_SEPARATOR));
   });
 
   const toggleTree = buildToggleTree(bodyClone);
@@ -3301,6 +3388,8 @@ function restoreAutosave(entry) {
   // 保存時点で洗浄済みの本文だが、保存領域が後から書き換えられている可能性を考え、
   // ファイル読み込みと同じサニタイズを必ず通す(8.1)。
   el.editorBody.innerHTML = sanitizeLoadedBodyHtml(entry.bodyHtml || "");
+  // 復元した本文も、読み込み時と同じく段落構造を整えてから使う(5.18)。
+  normalizeEditorStructure();
   state.meta = {
     schemaVersion: SCHEMA_VERSION,
     savedAt: entry.savedAt || null,
