@@ -833,6 +833,8 @@ el.btnInsertEmptyLine.addEventListener("click", () => {
   const insertBefore = range && anchor === closestBlock(range.startContainer) && caretIsAtBlockStart(range, anchor);
   const blank = document.createElement(anchor.tagName === "DIV" ? "div" : "p");
   blank.appendChild(document.createElement("br"));
+  // splitPlainBlockAtCaretと同じ理由で、見出しレベルのインデントを引き継ぐ。
+  blank.style.marginLeft = anchor.style.marginLeft;
 
   pushUndoSnapshot();
   anchor.parentNode.insertBefore(blank, insertBefore ? anchor : anchor.nextSibling);
@@ -1715,6 +1717,8 @@ function splitCopyWrapAtCaret(wrap, range) {
   const newP = document.createElement(p.tagName === "DIV" ? "div" : "p");
   const newWrap = wrapAsCpTarget(tailFragment, cpId);
   newP.appendChild(newWrap);
+  // splitPlainBlockAtCaretと同じ理由で、見出しレベルのインデントを引き継ぐ。
+  newP.style.marginLeft = p.style.marginLeft;
   p.parentNode.insertBefore(newP, p.nextSibling);
 
   // カーソルが改行の直前(文末)にあった場合、その改行がtailFragmentの先頭に
@@ -1941,6 +1945,11 @@ function splitPlainBlockAtCaret(block, range) {
 
   const newBlock = document.createElement(tagName);
   newBlock.appendChild(tailFragment);
+  // アウトラインの見出しレベルに応じたインデント(margin-left、updateHeadingIndent
+  // 参照)は段落ごとのインラインstyleで持っているため、新しく作る段落にも
+  // 分割元の段落から引き継がないと、レベル2以下の章で段落分けした瞬間に
+  // インデントが消えてレベル1と同じ位置に戻ってしまう(2026-09-18、Mikoto報告)。
+  newBlock.style.marginLeft = block.style.marginLeft;
   // 装飾タグ(<strong>など)の途中で分割すると、切れ目に中身の空いた装飾タグが残り、
   // それが先頭にあると<br>の除去(trimLeadingLineBreaks)が素通りしてしまう。
   // 先に空の装飾タグを消してから端の<br>を落とす(2026-08-13、Mikoto報告:
@@ -2450,6 +2459,22 @@ function renderOutlineView(container) {
       scheduleAutoRender();
     });
     row.appendChild(textInput);
+
+    // 編集タブでも見出し化した場所へジャンプできるようにする(2026-09-18、Mikoto要望)。
+    // プレビューモードの目次と同じ考え方だが、編集中の本文はcontenteditableのため、
+    // ジャンプはメニュー内のこのボタンからのみ行い、本文中の見出しクリックとは
+    // 競合させない。
+    const jumpBtn = document.createElement("button");
+    jumpBtn.type = "button";
+    jumpBtn.className = "outline-item__jump";
+    jumpBtn.textContent = "→";
+    jumpBtn.title = "この見出しの位置へジャンプ";
+    jumpBtn.setAttribute("aria-label", "この見出しの位置へジャンプ");
+    jumpBtn.addEventListener("click", () => {
+      jumpToHeadingInEditor(markEl.dataset.hid);
+      closeSidebar();
+    });
+    row.appendChild(jumpBtn);
 
     const isOpen = outlineOpenHid === markEl.dataset.hid;
     const toggleTitle = isOpen ? "編集欄を閉じる" : "並び替え・階層を編集";
@@ -2984,6 +3009,17 @@ function jumpToHeading(id) {
   target.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 window.jumpToHeading = jumpToHeading;
+
+// 編集タブ用のジャンプ(アウトラインビュー参照)。編集中の本文は折りたたみ構造を
+// 持たず(トグルの木構造はbuildToggleTreeで書き出し・プレビュー用に組み立てるだけ)、
+// 見出しにも実DOMのidは振っていないため、jumpToHeadingとは別に、data-hidを
+// 手がかりに見出し段落を探して合わせる。
+function jumpToHeadingInEditor(hid) {
+  const markEl = getHeadingMarks().find((m) => m.dataset.hid === hid);
+  if (!markEl) return;
+  const block = getHeadingParagraph(markEl);
+  (block || markEl).scrollIntoView({ behavior: "smooth", block: "start" });
+}
 
 /* ============================================================
  * NPCカード表示(5.10・5.11、プレビューモード)

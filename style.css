@@ -542,6 +542,20 @@ body.mode-preview .app-header__menu-btn {
 
 .outline-item__toggle:active { background: var(--accent); color: #fff; }
 
+.outline-item__jump {
+  flex-shrink: 0;
+  border: none;
+  background: var(--icon-btn-bg);
+  color: var(--text-muted);
+  border-radius: 6px;
+  min-width: 34px;
+  min-height: 34px;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.outline-item__jump:active { background: var(--accent); color: #fff; }
+
 .outline-item__actions {
   display: flex;
   flex-wrap: nowrap;
