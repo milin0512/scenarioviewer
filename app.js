@@ -1393,12 +1393,40 @@ el.btnInsertEmptyLine.addEventListener("click", () => {
     && rangeTextForPosition(rangeBeforeNode(copyWrap, anchor)) !== "");
   const insertBefore = !!copyWrap
     || (range && anchor === closestBlock(range.startContainer) && caretIsAtBlockStart(range, anchor));
+
+  // 段落の途中にカーソルがあるときは、カーソルの位置で段落を分けて間に空行を入れる
+  // (2026-09-28、Mikoto要望。以前は文章を分断しないよう段落の後ろに入れていた)。
+  // コピー範囲の中ならEnterと同じsplitCopyWrapAtCaretで分け、空行は下の
+  // sharedCopyRangeAroundでコピー範囲の一部になる。見出しの中では見出しを分けず、
+  // これまでどおり見出しの後ろに入れる。
+  let splitAtCaret = null;
+  if (range && range.collapsed && !insertBefore && anchor === closestBlock(range.startContainer)
+      && !findAncestorMark(range.startContainer, (n) => n.classList && n.classList.contains("h-mark"))) {
+    const wrapAtCaret = findAncestorMark(range.startContainer, (n) => n.classList && n.classList.contains("cp-wrap"));
+    const wrapTarget = wrapAtCaret && wrapAtCaret.querySelector(".cp-target");
+    if (wrapTarget && wrapTarget.contains(range.startContainer)) {
+      if (!caretIsAtBlockStart(range, wrapTarget) && hasLineContentAfterCaret(range, wrapTarget)) {
+        splitAtCaret = () => splitCopyWrapAtCaret(wrapAtCaret, range);
+      }
+    } else if (!wrapAtCaret && hasLineContentAfterCaret(range, anchor)) {
+      splitAtCaret = () => splitPlainBlockAtCaret(anchor, range);
+    }
+  }
+
   const blank = document.createElement(anchor.tagName === "DIV" ? "div" : "p");
   blank.appendChild(document.createElement("br"));
   // splitPlainBlockAtCaretと同じ理由で、見出しレベルのインデントを引き継ぐ。
   blank.style.marginLeft = anchor.style.marginLeft;
 
   pushUndoSnapshot();
+  if (splitAtCaret) {
+    splitAtCaret();
+    // 分けた後半の段落にコピー範囲が移っていれば、継ぎ目・下マージンを整え直す
+    const tail = anchor.nextElementSibling;
+    if (tail) tail.querySelectorAll(".cp-wrap").forEach((w) => { if (w.dataset.cpid) syncCopyWrapChain(w.dataset.cpid); });
+    // 前半の段落にコピー範囲が残っていなければ、継ぎ目用に0にしていた下マージンを戻す
+    if (!anchor.querySelector(".cp-wrap")) anchor.style.marginBottom = "";
+  }
   if (splitBeforeCopy) {
     const head = document.createElement(anchor.tagName === "DIV" ? "div" : "p");
     head.style.marginLeft = anchor.style.marginLeft;
