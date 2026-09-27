@@ -256,8 +256,60 @@ function normalizeEditorStructure() {
   // <br>で1行分を確保して、通常の空行と同じ扱いにする(2026-08-01、実機HTMLで4件確認)。
   body.querySelectorAll(".cp-target").forEach(ensureCopyTargetHeight);
 
+  // 見出しと同じ段落に別の内容が入り込んでいたら切り離す(以前の版で作られた文書への対処)
+  isolateAllHeadings();
+
   // 分割されたテキストノードを結合し、余計な境界をなくす
   body.normalize();
+}
+
+// 見出しは常に段落1つを占める(5.4)。見出しと同じ段落に別の内容(文章・コピー範囲など)が
+// 入り込んでいたら、見出しの前後で段落を切り離す(2026-09-28、Mikoto報告: 見出しの直後に
+// コピー範囲がある場面で見出しの末尾でEnterを押すと、コピー範囲の1段落目の後ろに新しい
+// 段落ができていた。コピー範囲の先頭でのバックスペースなどで、コピー範囲が見出しと同じ
+// 段落に入っていたのが原因。コピー範囲は見た目がブロックのため、画面では同じ段落かどうか
+// 判断できず、手で直す手段も無かった)。切り離したかどうかを返す。
+function isolateHeading(mark) {
+  const block = closestBlock(mark);
+  if (!block || block === el.editorBody || mark.parentNode !== block) return false;
+  const tag = block.tagName === "DIV" ? "div" : "p";
+  const meaningful = (n) => !(n.nodeType === 3 && n.data.trim() === "") && n.nodeName !== "BR";
+  const before = [];
+  const after = [];
+  for (let n = block.firstChild; n && n !== mark; n = n.nextSibling) before.push(n);
+  for (let n = mark.nextSibling; n; n = n.nextSibling) after.push(n);
+  const moveOut = (nodes, where) => {
+    const p = document.createElement(tag);
+    p.style.marginLeft = block.style.marginLeft;
+    nodes.forEach((n) => p.appendChild(n));
+    if (where === "before") {
+      trimTrailingLineBreaks(p);
+      block.parentNode.insertBefore(p, block);
+    } else {
+      trimLeadingLineBreaks(p);
+      block.parentNode.insertBefore(p, block.nextSibling);
+    }
+    return p;
+  };
+
+  const moved = [];
+  if (before.some(meaningful)) moved.push(moveOut(before, "before"));
+  if (after.some(meaningful)) moved.push(moveOut(after, "after"));
+  if (moved.length === 0) return false;
+  // 見出しの段落の外に出た、改行や空白だけの残りを落とす
+  Array.from(block.childNodes).forEach((n) => { if (n !== mark && !meaningful(n)) n.remove(); });
+  // コピー範囲の継ぎ目用に0にしていた下マージンは、コピー範囲と一緒に新しい段落へ移る
+  block.style.marginBottom = "";
+  moved.forEach((p) => {
+    p.querySelectorAll(".cp-wrap").forEach((w) => { if (w.dataset.cpid) syncCopyWrapChain(w.dataset.cpid); });
+  });
+  return true;
+}
+
+function isolateAllHeadings() {
+  let changed = false;
+  el.editorBody.querySelectorAll(".h-mark").forEach((m) => { if (isolateHeading(m)) changed = true; });
+  return changed;
 }
 
 /* ============================================================
@@ -2687,6 +2739,8 @@ el.editorBody.addEventListener("beforeinput", (e) => {
   // 空の見出しの印が残っていた。見出しの末尾では段落分けのみで構わない、とのこと)。
   const hmark = findAncestorMark(range.startContainer, (n) => n.classList && n.classList.contains("h-mark"));
   if (hmark && range.collapsed && !hasLineContentAfterCaret(range, hmark)) {
+    // 見出しと同じ段落に別の内容が入っていると、その後ろに段落ができてしまうため先に切り離す
+    isolateHeading(hmark);
     insertParagraphAfterHeading(hmark);
     scheduleAutoRender();
     return;
@@ -2823,6 +2877,8 @@ el.editorBody.addEventListener("beforeinput", (e) => {
   if (!prev || (prev.tagName !== "P" && prev.tagName !== "DIV")) return;
 
   e.preventDefault();
+  // 見出し・コピー範囲を含む段落は見出しの段落につなげない(mergeBlocks参照)。何もしない
+  if (prev.querySelector(".h-mark") && block.querySelector(".h-mark, .cp-wrap")) return;
   pushUndoSnapshot();
   mergeBlocks(prev, block);
   scheduleAutoRender();
@@ -2839,6 +2895,12 @@ el.editorBody.addEventListener("beforeinput", (e) => {
 // 見出し・コピー範囲は兄弟要素として並べる。
 function mergeBlocks(prev, block) {
   const blockHasStructuralMark = !!(block.querySelector(".h-mark") || block.querySelector(".cp-wrap"));
+
+  // 見出しの段落には、見出し・コピー範囲を含む段落をつなげない(見出しは段落1つを占める。
+  // isolateHeading参照)。以前はコピー範囲の先頭でバックスペースを押すと、コピー範囲が
+  // 見出しと同じ段落に入っていた(2026-09-28、Mikoto報告)。文章だけの段落は従来どおり
+  // 見出しの中へつながる(Wordで見出しの直後の段落を消したときと同じ)。
+  if (blockHasStructuralMark && prev.querySelector(".h-mark")) return;
 
   // 特例: Enterで段落分けしたコピー範囲(同じcpidの.cp-wrapが前後に分かれている)を
   // バックスペースで結合する場合は、分割前の1つのコピー範囲に戻す。
