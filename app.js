@@ -2523,7 +2523,14 @@ function mergeBlocks(prev, block) {
     trimTrailingLineBreaks(prevTarget);
     const caretOffset = (prevTarget.textContent || "").length;
     trimLeadingLineBreaks(nextTarget);
+    // 通常の結合と同じく、区切りはまず詰まった改行にする(2026-09-28、Mikoto要望)
+    let joinBr = null;
+    if (rangeTextForPosition(rangeOfContents(prevTarget)) !== "") {
+      joinBr = document.createElement("br");
+      prevTarget.appendChild(joinBr);
+    }
     while (nextTarget.firstChild) prevTarget.appendChild(nextTarget.firstChild);
+    if (joinBr && !hasLineContentAfter(joinBr, prevTarget)) prevTarget.appendChild(document.createElement("br"));
     // 移ってきた側にボタンがあれば、それを残す(元々あった側のボタンは重複するので消す)
     const newBtn = blockWrap.querySelector(".cp-btn");
     if (newBtn) {
@@ -2534,7 +2541,8 @@ function mergeBlocks(prev, block) {
     ensureBlockHeight(prevTarget);
     block.remove();
     syncCopyWrapChain(prevWrap.dataset.cpid);
-    placeCaretAtOffset(prevTarget, caretOffset);
+    if (joinBr && joinBr.isConnected) placeCaretAfter(joinBr);
+    else placeCaretAtOffset(prevTarget, caretOffset);
     return;
   }
 
@@ -2549,6 +2557,27 @@ function mergeBlocks(prev, block) {
   trimTrailingLineBreaks(target);
   const caretOffset = (target.textContent || "").length;
   const isEmpty = (block.textContent || "").trim() === "";
+
+  // 段落の区切りは、まず詰まった改行に変える(Enterの逆。2026-09-28、Mikoto要望:
+  // 段落冒頭のバックスペース1回目で改行した状態でつながり、2回目で改行が消えて
+  // 文章がつながる)。2回目は段落の途中の改行削除なので、ブラウザ既定の動作に任せる。
+  // 見出しの中、見た目がブロックの要素(見出し・コピー範囲)との境目、前の段落が
+  // 空の場合は、改行を挟むと空行ができたり見出しの中に改行が入ったりするため、
+  // これまでどおり直接つなげる。
+  if (useLineBreakOnMerge(prev, target, block)) {
+    trimLeadingLineBreaks(block);
+    const br = document.createElement("br");
+    target.appendChild(br);
+    while (block.firstChild) target.appendChild(block.firstChild);
+    block.remove();
+    // 改行の後ろに何も無いと新しい行が表示されないため、高さ確保の<br>を足す
+    // (insertLineBreakAtCaretと同じ理由)
+    const tb = closestBlock(br);
+    if (tb && !hasLineContentAfter(br, tb)) target.appendChild(document.createElement("br"));
+    placeCaretAfter(br);
+    return;
+  }
+
   if (!isEmpty) {
     trimLeadingLineBreaks(block);
     while (block.firstChild) target.appendChild(block.firstChild);
@@ -2557,6 +2586,33 @@ function mergeBlocks(prev, block) {
   ensureBlockHeight(target);
   target.normalize();
   placeCaretAtOffset(target, caretOffset);
+}
+
+// 段落の結合で、区切りを詰まった改行として残すか(mergeBlocks参照)。
+function useLineBreakOnMerge(prev, target, block) {
+  const isBlockLike = (n) => !!(n && n.classList && (n.classList.contains("h-mark") || n.classList.contains("cp-wrap")));
+  if (isBlockLike(target)) return false;                            // 見出しの中
+  if (target === prev && isBlockLike(prev.lastElementChild)) return false; // 前の段落が見出し・コピー範囲で終わる
+  if (rangeTextForPosition(rangeOfContents(target)) === "") return false;  // 前の段落が空
+  // 後ろの段落が見出し・コピー範囲で始まる
+  const first = Array.from(block.childNodes).find((n) => !(n.nodeType === 3 && n.data === "") && n.nodeName !== "BR");
+  if (isBlockLike(first)) return false;
+  return true;
+}
+
+function rangeOfContents(node) {
+  const r = document.createRange();
+  r.selectNodeContents(node);
+  return r;
+}
+
+function placeCaretAfter(node) {
+  const sel = window.getSelection();
+  const caret = document.createRange();
+  caret.setStartAfter(node);
+  caret.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(caret);
 }
 
 function lastElementIfMatches(block, className) {
