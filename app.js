@@ -2221,6 +2221,10 @@ function splitCopyWrapAtCaret(wrap, range) {
 // 原因になっていた(2026-08-13、Mikoto報告)。段落の先頭からカーソルまでのテキストを
 // 組み立てて、改行で終わっているかで判定する方式に変えて安定させた。
 //
+// 2026-08-13に「改行の直前(下に行が続く文末)でEnter1回でも段落分け」にする判定
+// (caretIsRightBeforeLineBreak)を加えたが、「Enter1回で改行、2回で段落分け」の
+// 基本ルールが崩れるため2026-09-28に取りやめた(Mikoto要望)。文末でのEnter1回は改行になる。
+//
 // Enterはブラウザによってkeydownの内容が異なるため、入力の種類が明示される
 // beforeinputで判定する(iOSのソフトウェアキーボード対策)。
 function caretIsAtLineStart(range) {
@@ -2241,36 +2245,19 @@ function caretIsAtLineStart(range) {
   return /\n$/.test(holder.textContent || "");
 }
 
-// caretIsAtLineStartの逆方向版(2026-08-13、Mikoto要望)。
-//
-// 「改行の直後(次の行の先頭)」にカーソルがあるときは上のcaretIsAtLineStartが
-// 段落分けと判定するが、「改行の直前(前の行の文末)」にカーソルがあるときは
-// これまで判定対象外で、詰まった改行がもう1つ増えるだけだった(=空行が挿入される)。
-// 文末でEnterを押しても段落分けになるよう、こちらも段落分けの対象に含める。
-//
-// 段落の中の<br>を文書順に辿り、カーソル以降で最初に現れる<br>までの間に文字が
-// 無ければ「その改行の直前」と判定する(caretIsAtLineStartがカーソルより前のテキストを
-// 組み立てるのと対称に、カーソルより後ろのテキストを組み立てて判定する)。
-function caretIsRightBeforeLineBreak(range) {
-  if (!range.collapsed) return false;
-  const block = closestBlock(range.startContainer);
-  if (!block || block === el.editorBody) return false;
-  const brs = Array.from(block.querySelectorAll("br"));
-  for (const br of brs) {
-    const brStart = document.createRange();
-    brStart.setStartBefore(br);
-    // カーソルより前にある<br>(すでに通り過ぎた行の改行)は対象外
-    if (range.compareBoundaryPoints(Range.START_TO_START, brStart) > 0) continue;
-    const between = document.createRange();
-    try {
-      between.setStart(range.startContainer, range.startOffset);
-      between.setEndBefore(br);
-    } catch (err) {
-      return false;
-    }
-    return rangeTextForPosition(between) === "";
+// nodeの後ろから段落の終わりまでに、文字か<br>が残っているか。
+function hasLineContentAfter(node, block) {
+  const after = document.createRange();
+  try {
+    after.setStartAfter(node);
+    after.setEnd(block, block.childNodes.length);
+  } catch (err) {
+    return true;
   }
-  return false;
+  if (rangeTextForPosition(after) !== "") return true;
+  const holder = document.createElement("div");
+  holder.appendChild(after.cloneContents());
+  return !!holder.querySelector("br");
 }
 
 // 範囲に含まれるテキスト(コピペボタンのラベルは除く)。位置の判定に使う。
@@ -2385,7 +2372,13 @@ function insertLineBreakAtCaret(range) {
   // 行の末尾に改行を入れた場合、その後に何も続かないと1行分の高さが確保されない
   // (ブラウザの表示上の性質)。もう1つ<br>を続けて高さを保つが、カーソルは
   // 最初のbrの直後(=新しい行の先頭)に置く。
-  if (!br.nextSibling) {
+  // 以前は「br.nextSiblingが無いか」で判定していたが、テキストの末尾にカーソルが
+  // あるとinsertNodeがテキストを分割して空のテキストノードを後ろに残すため、
+  // 段落末尾でも「後ろに何かある」と誤判定され、新しい行が表示されずカーソルが
+  // 動かなかった(2026-09-28、Mikoto報告: 段落末尾でEnter1回の改行ができない)。
+  // 段落の終わりまでに文字や<br>が残っているかで判定する。
+  const block = closestBlock(br);
+  if (block && !hasLineContentAfter(br, block)) {
     br.parentNode.insertBefore(document.createElement("br"), br.nextSibling);
   }
 
@@ -2443,7 +2436,7 @@ el.editorBody.addEventListener("beforeinput", (e) => {
   if (!el.editorBody.contains(range.startContainer)) return;
 
   const wrap = findAncestorMark(range.startContainer, (n) => n.classList && n.classList.contains("cp-wrap"));
-  const startNewParagraph = caretIsAtLineStart(range) || caretIsRightBeforeLineBreak(range);
+  const startNewParagraph = caretIsAtLineStart(range);
 
   e.preventDefault();
   pushUndoSnapshot();
