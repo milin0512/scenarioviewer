@@ -426,8 +426,25 @@ const PDF_LETTER_SPACING_RE = new RegExp(
 const PDF_PUNCT_CLASS = "\\u3001-\\u303F\\uFF01-\\uFF0F\\uFF1A-\\uFF20\\uFF3B-\\uFF40\\uFF5B-\\uFF65・\\u25A0-\\u25FF\\u2605\\u2606\\u203B";
 const PDF_SPACE_NEAR_PUNCT_RE = new RegExp(`(?<=[${PDF_PUNCT_CLASS}]) +| +(?=[${PDF_PUNCT_CLASS}])`, "g");
 
+const PDF_LINE_END_SPACE_RE = new RegExp(`(?<=[${PDF_WORD_CHAR_CLASS}]) +(?=[${PDF_WORD_CHAR_CLASS}]{1,4}$)`);
+
+// TRPG用語の略称(KPC・PCなど)の文字間のスペース(「K P C」「KP C」「H O」)。
+// Mikoto指定の8語に限る(2026-09-28)。長い語から順に当てる。
+const PDF_ROLE_TERMS = ["KPC", "NPC", "KP", "PL", "PC", "RP", "HO", "GM"];
+const PDF_ROLE_TERM_RES = PDF_ROLE_TERMS.map(
+  (term) => new RegExp(`(?<![A-Za-z])${term.split("").join(" *")}(?![A-Za-z])`, "g")
+);
+
+function collapsePdfRoleTerms(text) {
+  let result = text;
+  PDF_ROLE_TERM_RES.forEach((re, i) => {
+    result = result.replace(re, PDF_ROLE_TERMS[i]);
+  });
+  return result;
+}
+
 function tidyPdfSpacing(text) {
-  return text
+  return collapsePdfRoleTerms(text)
     .replace(PDF_SPACE_NEAR_PUNCT_RE, "")
     .replace(PDF_SPACE_CJK_LATIN_RE, "")
     .replace(PDF_LETTER_SPACING_RE, "")
@@ -464,6 +481,8 @@ function buildPdfPageSegments(textContent, pageWidth, pageHeight) {
     kept.set(it.str, same);
     return true;
   });
+
+  removeAlignedPdfSpaces(items);
 
   // 本文の基準フォントサイズを、文字数で重み付けした最頻値として推定する
   const sizeWeights = new Map();
@@ -517,6 +536,48 @@ function buildPdfPageSegments(textContent, pageWidth, pageHeight) {
   });
   page.segments = page.segments.filter((seg) => seg.text !== "");
   return page;
+}
+
+// 同じページの複数の行で、ほぼ同じ横位置に入っている「日本語と日本語の間の半角スペース」を
+// 取り除く。お迎えには傘が必要では、ほぼ全行の同じ位置(行末の2〜3文字手前)に
+// 「配慮す る。」「シ ノーソ」のようなスペースが入っていた(2026-09-28、Mikotoの実機確認)。
+// 「天竺 一」「望月 紳助」のような語の区切りのスペースは、複数行で縦にそろうことはまず
+// ないので残る。スペースの位置は、断片の幅を文字数で割って概算する。
+function removeAlignedPdfSpaces(items) {
+  const re = new RegExp(`(?<=[${PDF_WORD_CHAR_CLASS}]) (?=[${PDF_WORD_CHAR_CLASS}])`, "g");
+  const spaces = [];
+  items.forEach((it) => {
+    const chars = Array.from(it.str);
+    if (chars.length < 2) return;
+    // 1文字ずつ空けた字間(「天 使 と 悪 魔」)は、後段の字間の処理にまとめて任せる。
+    // ここで一部だけ消すと「天使 と悪魔」のように中途半端に残ってしまう。
+    if (chars.filter((c) => c === " ").length / chars.length > 0.2) return;
+    let m;
+    re.lastIndex = 0;
+    while ((m = re.exec(it.str))) {
+      const before = Array.from(it.str.slice(0, m.index));
+      // 日本語は等幅として「前にある文字数×文字サイズ」で位置を見積もる
+      // (半角スペース・英数字は半分の幅として数える)
+      const units = before.reduce((a, c) => a + (/[\x20-\x7E]/.test(c) ? 0.5 : 1), 0);
+      spaces.push({ it, index: before.length, x: it.x + units * it.size });
+    }
+  });
+  if (spaces.length < 3) return;
+  const aligned = spaces.filter((s) => {
+    const tol = s.it.size * 0.8;
+    const rows = new Set(spaces.filter((o) => Math.abs(o.x - s.x) <= tol).map((o) => Math.round(o.it.y)));
+    return rows.size >= 3;
+  });
+  // 後ろの位置から消していけば、同じ断片内の他のスペースの位置がずれない
+  aligned
+    .sort((a, b) => b.index - a.index)
+    .forEach((s) => {
+      const chars = Array.from(s.it.str);
+      if (chars[s.index] === " ") {
+        chars.splice(s.index, 1);
+        s.it.str = chars.join("");
+      }
+    });
 }
 
 // ルビ(ふりがな)の判定。旧実装は「本文より明確に小さい文字」をすべてルビとして
@@ -812,13 +873,28 @@ function segmentsToPdfLines(segments) {
   }
   // 行送りは文字サイズに対する比で見る(見出しなど大きい文字の行が混ざっても崩れないように)
   const typicalPitch = median(pitches) || 1.5;
+  const left = Math.min(...lines.map((l) => l.x0));
   const right = Math.max(...lines.map((l) => l.x1));
   lines.forEach((line, i) => {
-    // 1行しかない段(見出しなど)は、行末が揃っているかを比べる相手がいないので
-    // 「行末まで詰まっている」とはみなさない。
+    // 「行末まで詰まっている(=折り返し)」かどうかは、段全体で一番長い行ではなく、
+    // 前後3行の同じ文字サイズの行と比べて判定する。エンデビの秘匿HOのように、
+    // 囲みの見出しだけが少し長く、その下の箇条書きが手動改行で20ptほど手前で
+    // 折り返されている場合に、箇条書きの行が「詰まっていない」と誤判定され、
+    // 文の途中で改行が残っていた(2026-09-28、Mikotoの実機確認で判明)。
+    // ただし、近くの行がそろって短い(項目の一覧など)場合は折り返しとはみなさない。
     // 禁則処理(行頭に来られない文字の追い出し)で、折り返した行でも1〜2文字分
     // 手前で終わることがあるため、2.5文字分の余裕をみる(イクテュエスで確認)。
-    line.full = lines.length >= 2 && line.x1 >= right - line.size * 2.5;
+    // 1行しかない段(見出しなど)は、比べる相手がいないので折り返しとはみなさない。
+    const neighbors = lines.filter(
+      (l, j) => Math.abs(i - j) <= 3 && Math.abs(l.size - line.size) <= Math.min(l.size, line.size) * 0.15
+    );
+    const localRight = Math.max(...neighbors.map((l) => l.x1));
+    const wideEnough = right > left && (localRight - left) / (right - left) >= 0.8;
+    line.full = neighbors.length >= 2 && wideEnough && line.x1 >= localRight - line.size * 2.5;
+    // 行末近く(残り4文字以内)の日本語の間にだけ入っている半角スペースは、両端揃えの
+    // 名残とみられる(お迎えには傘が必要で、ほぼ全行の同じ位置に「シ ノーソ」
+    // 「イシスから 授け」のように入っていた)。折り返した行に限って取り除く。
+    if (line.full) line.text = line.text.replace(PDF_LINE_END_SPACE_RE, "");
     if (i === 0) return;
     const pitch = (lines[i - 1].y - line.y) / line.size;
     if (pitch > typicalPitch * 1.6) line.boundary = "para";
