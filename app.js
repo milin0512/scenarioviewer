@@ -317,7 +317,30 @@ function decodeTextFile(arrayBuffer) {
 /* ============================================================
  * PDF読み込み(5.1・4章)
  * pdf.js(vendor/pdfjs/)を用いてテキストを抽出する。
- * レイアウトが複雑なPDFでは行の並び順が乱れる場合がある(要検証、11章-10参照)。
+ *
+ * 2026-09-28、全面的に作り直した(Mikoto要望。「エンジェル・デビル・インプロパー」
+ * 「手繰り喚せろよイクテュエス」の2本で、付属のTXT版と突き合わせて検証)。旧実装で
+ * 起きていた問題と、それぞれの対処は次のとおり。
+ *
+ *  1. ページ端の目次(インデックス)が本文の同じ高さの行に混ざる
+ *     → 行を「横に大きく離れた塊(セグメント)」単位に分け、全ページの同じ位置に
+ *       同じ文字列で繰り返し現れる塊は、目次・柱・フッターとみなして除外する。
+ *  2. 段組み・メモ欄を認識できず、左右の文章が1行ずつ交互に混ざる
+ *     → ページ中央付近に限らず「文字の無い縦の帯(溝)」を探して段を分け、
+ *       段をまたぐ見出しなどで区切られたブロックごとに左の段→右の段の順に読む。
+ *  3. 改ページ・手動改行で文の途中に改行が入る
+ *     → ページをまたいでも1つの流れとして扱い、行末が文の途中(句点などで
+ *       終わっていない)なら次の行とつなぐ。
+ *  4. 改ページ前後の文章が抜ける
+ *     → 旧実装はページ上下5%の帯と、本文より小さい文字(ルビ扱い)を一律に捨てて
+ *       いた。本文が余白近くまで組まれたページや、小さい文字の注記がそのまま
+ *       消えていたため、どちらも条件を絞った(ページ番号だけの行/本文の真上に
+ *       乗っている小さい文字だけを除く)。
+ *  5. 文字の間に余計なスペースが入る(字間を空けた見出し、和欧間のスペース)
+ *     → 日本語の文字に隣接する半角スペースを取り除く(英単語間のスペースは残す)。
+ *  6. 「⾒」「⻑」のような、見た目は同じだが別の文字(康熙部首・CJK部首補助)が
+ *     混ざり、検索・一括置換で引っかからない
+ *     → 通常の漢字に置き換える。
  * ========================================================== */
 
 // pdf.min.js はクラシックスクリプト(UMDビルド)として読み込んでおり、
@@ -341,167 +364,532 @@ async function extractPdfText(file) {
     isEvalSupported: false,
   }).promise;
 
-  const pageTexts = [];
+  // 繰り返し要素(目次・柱)の判定に全ページを見比べる必要があるため、
+  // まず全ページを「塊(セグメント)」まで分解してから、まとめて並べ直す。
+  const pages = [];
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const textContent = await page.getTextContent();
     const viewport = page.getViewport({ scale: 1 });
-    pageTexts.push(buildPdfPageText(textContent, viewport.height));
+    pages.push(buildPdfPageSegments(textContent, viewport.width, viewport.height));
   }
-  return pageTexts.join("\n\n");
+  removeRepeatedPdfSegments(pages);
+
+  const lines = [];
+  pages.forEach((page) => {
+    removePdfPageNumbers(page);
+    orderPdfPageLines(page).forEach((line) => lines.push(line));
+  });
+  return joinPdfLines(lines);
 }
 
-// ページ内のテキスト断片をY座標(行)でグループ化し、X座標順に並べて行を復元する。
-// 日本語の文章では単語間にスペースを挿入しない(誤ってスペースを混入させないため)。
-function buildPdfPageText(textContent, pageHeight) {
-  const rawItems = textContent.items.filter((it) => typeof it.str === "string" && it.str !== "");
-  if (rawItems.length === 0) return "";
+/* ---------- 文字の正規化 ---------- */
 
-  const items = rawItems.map((it) => ({
-    x: it.transform[4],
-    y: it.transform[5],
-    width: it.width || 0,
-    scale: Math.abs(it.transform[0]) || Math.abs(it.transform[3]) || 1,
-    str: it.str,
-  }));
+// CJK部首補助(U+2E80〜)のうち、日本語フォントの抽出で通常の漢字の代わりに
+// 現れることがあるもの。康熙部首(U+2F00〜)はNFKC正規化で通常の漢字に戻るが、
+// こちらは戻らないため個別に対応させる。
+const PDF_RADICAL_MAP = {
+  "⺟": "母", "⺠": "民", "⻁": "虎", "⻄": "西", "⻆": "角",
+  "⻑": "長", "⻘": "青", "⻝": "食", "⻣": "骨", "⻤": "鬼",
+  "⻨": "麦", "⻩": "黄", "⻫": "斉", "⻭": "歯", "⻯": "竜",
+  "⻲": "亀",
+};
+
+function normalizePdfChars(str) {
+  return str
+    .replace(/[⼀-⿕]/g, (c) => c.normalize("NFKC"))
+    .replace(/[⺀-⻳]/g, (c) => PDF_RADICAL_MAP[c] || c)
+    // 「‧」(U+2027)は中黒「・」の代わりに使われていることが多い(イクテュエスで確認)
+    .replace(/‧/g, "・");
+}
+
+// 日本語の文字(かな・漢字・全角記号)
+const PDF_CJK_CLASS = "\\u3000-\\u303F\\u3040-\\u30FF\\u31F0-\\u31FF\\u3400-\\u9FFF\\uF900-\\uFAFF\\uFF00-\\uFFEF・";
+const PDF_CJK_RE = new RegExp(`[${PDF_CJK_CLASS}]`);
+// 日本語と英数字の間の半角スペース(和欧間の空きがスペース文字として埋め込まれたもの。
+// 「RP による」「6 版対応」)
+const PDF_SPACE_CJK_LATIN_RE = new RegExp(
+  `(?<=[${PDF_CJK_CLASS}]) +(?=[^\\s${PDF_CJK_CLASS}])|(?<=[^\\s${PDF_CJK_CLASS}]) +(?=[${PDF_CJK_CLASS}])`,
+  "g"
+);
+// 1文字ずつ半角スペースで区切った字間(「注 意 事 項」「概 要」)。
+// 「天竺 一」「てんじく はじめ」のような語と語の間のスペースは原文どおり残すため、
+// スペースの両側がどちらも「1文字だけの語」の場合に限る(句読点は語の区切りとみなす)。
+const PDF_WORD_CHAR_CLASS = "\\u3040-\\u30FA\\u30FC-\\u30FF\\u31F0-\\u31FF\\u3400-\\u9FFF\\uF900-\\uFAFF";
+const PDF_LETTER_SPACING_RE = new RegExp(
+  `(?<=(?:^|[^${PDF_WORD_CHAR_CLASS}])[${PDF_WORD_CHAR_CLASS}]) +(?=[${PDF_WORD_CHAR_CLASS}](?:$|[^${PDF_WORD_CHAR_CLASS}]))`,
+  "g"
+);
+
+// 句読点・かっこ(、。「」など)や見出し記号(■▼★※など)の前後の半角スペース。
+// 語の区切りとしての意味はない。
+const PDF_PUNCT_CLASS = "\\u3001-\\u303F\\uFF01-\\uFF0F\\uFF1A-\\uFF20\\uFF3B-\\uFF40\\uFF5B-\\uFF65・\\u25A0-\\u25FF\\u2605\\u2606\\u203B";
+const PDF_SPACE_NEAR_PUNCT_RE = new RegExp(`(?<=[${PDF_PUNCT_CLASS}]) +| +(?=[${PDF_PUNCT_CLASS}])`, "g");
+
+function tidyPdfSpacing(text) {
+  return text
+    .replace(PDF_SPACE_NEAR_PUNCT_RE, "")
+    .replace(PDF_SPACE_CJK_LATIN_RE, "")
+    .replace(PDF_LETTER_SPACING_RE, "")
+    .replace(/ {2,}/g, " ")
+    .trim();
+}
+
+/* ---------- 1ページ分: 断片 → 塊(セグメント) ---------- */
+
+// ページ内のテキスト断片を、同じ高さ(ベースライン)ごとにまとめ、さらに横に大きく
+// 離れた箇所で「塊」に分ける。ページ端の目次やメモ欄は、本文と同じ高さにあっても
+// 別の塊になるため、後段で本文と混ざらずに扱える。
+function buildPdfPageSegments(textContent, pageWidth, pageHeight) {
+  const page = { width: pageWidth, height: pageHeight, segments: [], bodySize: 10 };
+  let items = textContent.items
+    .filter((it) => typeof it.str === "string" && it.str.trim() !== "")
+    .map((it) => ({
+      x: it.transform[4],
+      y: it.transform[5],
+      w: Math.max(it.width || 0, 0),
+      size: Math.abs(it.transform[3]) || Math.abs(it.transform[0]) || 1,
+      str: normalizePdfChars(it.str),
+    }));
+  if (items.length === 0) return page;
+
+  // 同じ位置に同じ文字列が重なっている断片(袋文字・影付き文字などの装飾)は1つにする。
+  // 1pt未満ずらして重ねてあるもの(エンデビの目次で確認)もあるため、位置は許容差で比べる。
+  const kept = new Map();
+  items = items.filter((it) => {
+    const tol = Math.max(1, it.size * 0.3);
+    const same = kept.get(it.str) || [];
+    if (same.some((k) => Math.abs(k.x - it.x) <= tol && Math.abs(k.y - it.y) <= tol)) return false;
+    same.push(it);
+    kept.set(it.str, same);
+    return true;
+  });
 
   // 本文の基準フォントサイズを、文字数で重み付けした最頻値として推定する
-  const scaleWeights = new Map();
+  const sizeWeights = new Map();
   items.forEach((it) => {
-    const key = Math.round(it.scale * 10) / 10;
-    scaleWeights.set(key, (scaleWeights.get(key) || 0) + it.str.length);
+    const key = Math.round(it.size * 10) / 10;
+    sizeWeights.set(key, (sizeWeights.get(key) || 0) + it.str.length);
   });
-  let dominantScale = items[0].scale;
+  let bodySize = items[0].size;
   let bestWeight = -1;
-  scaleWeights.forEach((weight, key) => {
-    if (weight > bestWeight) {
-      bestWeight = weight;
-      dominantScale = key;
-    }
+  sizeWeights.forEach((weight, key) => {
+    if (weight > bestWeight) { bestWeight = weight; bodySize = key; }
   });
+  page.bodySize = bodySize;
 
-  // ルビ(ふりがな)は基準サイズより明確に小さいフォントで現れるため除外する。
-  // (本文にそのまま混ぜると「家屋おく」のように読みが割り込んで文章が壊れるため)
-  let bodyItems = items.filter((it) => it.scale >= dominantScale * 0.65);
-  if (bodyItems.length === 0) return "";
+  items = items.filter((it) => !isPdfRuby(it, items));
 
-  // ページ上下の余白(目安5%)にあるランニングヘッダー・ページ番号などは、
-  // 段組み判定を邪魔 するうえ本文としても不要なので除外する。
-  if (pageHeight) {
-    const margin = pageHeight * 0.05;
-    const withoutMargins = bodyItems.filter((it) => it.y > margin && it.y < pageHeight - margin);
-    if (withoutMargins.length > 0) bodyItems = withoutMargins;
-  }
-
-  // 段組みの検出: 全断片の水平方向の占有範囲を統合し、空白帯(隙間)があれば
-  // そこで列を左右に分割する(2段組まで対応)。
-  const columns = splitIntoColumns(bodyItems);
-
-  return columns
-    .map((columnItems) => buildColumnText(columnItems))
-    .filter((t) => t !== "")
-    .join("\n\n");
-}
-
-// 段組みの検出: 全断片を水平方向の区間[x, x+width]とみなして統合(区間マージ)し、
-// ページの水平投影に生じる「空白帯」を探す。この空白帯がページのほぼ中央にあり、
-// 左右それぞれに十分な文字量があれば、2段組とみなしてそこで列を分割する。
-// (単純な「開始x座標同士の最大の隙間」で判定すると、ルビ(ふりがな)で分断された
-// 行の断片が作る見かけ上の隙間を段組みの境界と誤認することがあるため、
-// 区間の統合によって本当に文字が存在しない帯だけを隙間として扱う。)
-function splitIntoColumns(items) {
-  if (items.length < 20) return [items]; // 判定に足る量がない場合は単一列扱い
-
-  const intervals = items
-    .map((it) => [it.x, it.x + Math.max(it.width, 0.1)])
-    .sort((a, b) => a[0] - b[0]);
-
-  const gaps = [];
-  let curEnd = intervals[0][1];
-  for (let i = 1; i < intervals.length; i++) {
-    const [s, e] = intervals[i];
-    if (s > curEnd) gaps.push({ from: curEnd, to: s, size: s - curEnd });
-    curEnd = Math.max(curEnd, e);
-  }
-  if (gaps.length === 0) return [items];
-
-  gaps.sort((a, b) => b.size - a.size);
-  const overallMin = intervals[0][0];
-  const overallMax = Math.max(...intervals.map((iv) => iv[1]));
-
-  for (const gap of gaps) {
-    if (gap.size <= 1) break; // サイズ順なので、これ以降はさらに小さい
-
-    const splitPoint = (gap.from + gap.to) / 2;
-    const relativePos = overallMax > overallMin ? (splitPoint - overallMin) / (overallMax - overallMin) : 0;
-    if (relativePos <= 0.25 || relativePos >= 0.75) continue; // ページ中央付近でない隙間はヘッダー等とみなし除外
-
-    const left = items.filter((it) => it.x < splitPoint);
-    const right = items.filter((it) => it.x >= splitPoint);
-    const totalChars = items.reduce((a, it) => a + Math.max(it.str.length, 1), 0);
-    const leftChars = left.reduce((a, it) => a + Math.max(it.str.length, 1), 0);
-    const rightChars = totalChars - leftChars;
-    const minPopulationRatio = 0.12;
-    const wellPopulated =
-      leftChars / totalChars >= minPopulationRatio && rightChars / totalChars >= minPopulationRatio;
-
-    if (wellPopulated) {
-      return [left, right]; // 横書き2段組は左列→右列の順で読む想定
-    }
-  }
-
-  return [items];
-}
-
-// 列内の断片をY座標で行にグループ化し、X座標順に並べたうえで、
-// 行間隔・行末位置から「折り返し(連結)」か「段落・箇条書きの区切り」かを判定する。
-function buildColumnText(items) {
-  const yTolerance = 2.5;
-  const lines = [];
-  items.forEach((item) => {
-    let line = lines.find((l) => Math.abs(l.y - item.y) <= yTolerance);
-    if (!line) {
-      line = { y: item.y, parts: [] };
-      lines.push(line);
-    }
-    line.parts.push(item);
-  });
-
-  lines.forEach((line) => line.parts.sort((a, b) => a.x - b.x));
-  lines.sort((a, b) => b.y - a.y); // PDF座標は下から上へ増えるため、Yが大きい順=読み順
-
-  lines.forEach((line) => {
-    line.text = line.parts.map((p) => p.str).join("").trim();
-    const last = line.parts[line.parts.length - 1];
-    line.rightEdge = last ? last.x + last.width : line.y;
-  });
-
-  const nonEmptyLines = lines.filter((l) => l.text !== "");
-  if (nonEmptyLines.length === 0) return "";
-
-  const gaps = [];
-  for (let i = 1; i < nonEmptyLines.length; i++) {
-    const g = nonEmptyLines[i - 1].y - nonEmptyLines[i].y;
-    if (g > 0) gaps.push(g);
-  }
-  const typicalGap = median(gaps) || 14;
-  const rightMargin = Math.max(...nonEmptyLines.map((l) => l.rightEdge));
-
-  let result = nonEmptyLines[0].text;
-  for (let i = 1; i < nonEmptyLines.length; i++) {
-    const prev = nonEmptyLines[i - 1];
-    const cur = nonEmptyLines[i];
-    const gap = prev.y - cur.y;
-    const prevWasFull = prev.rightEdge >= rightMargin - typicalGap;
-    const normalSpacing = gap <= typicalGap * 1.6;
-
-    if (normalSpacing && prevWasFull) {
-      result += cur.text; // 折り返しとみなし、改行なしで連結する
+  // 同じ高さの断片を行にまとめる(許容差は文字サイズに比例させる)
+  items.sort((a, b) => b.y - a.y || a.x - b.x);
+  const rows = [];
+  items.forEach((it) => {
+    const row = rows.find((r) => Math.abs(r.y - it.y) <= Math.max(r.size, it.size) * 0.5);
+    if (row) {
+      row.items.push(it);
+      row.size = Math.max(row.size, it.size);
     } else {
-      result += "\n" + cur.text; // 段落・箇条書きの区切りとみなす
+      rows.push({ y: it.y, size: it.size, items: [it] });
+    }
+  });
+
+  rows.forEach((row) => {
+    row.items.sort((a, b) => a.x - b.x);
+    let seg = null;
+    row.items.forEach((it) => {
+      const gap = seg ? it.x - seg.x1 : Infinity;
+      // 字間を空けた見出し(「概　要」)は1つの塊のまま、隣の段の文字とは分かれるよう、
+      // 小さい方の文字サイズを基準に判定する
+      if (seg && gap <= Math.min(seg.size, it.size) * 1.5) {
+        seg.parts.push(it);
+        seg.x1 = Math.max(seg.x1, it.x + it.w);
+        seg.size = Math.max(seg.size, it.size);
+      } else {
+        // 塊の高さは、同じ行にまとめた他の塊ではなく、塊自身の先頭の断片で決める
+        // (ページ間で同じ位置かを比べる際に、隣の本文の行の高さに引きずられないように)
+        seg = { y: it.y, x0: it.x, x1: it.x + it.w, size: it.size, parts: [it] };
+        page.segments.push(seg);
+      }
+    });
+  });
+  page.segments.forEach((seg) => {
+    seg.text = tidyPdfSpacing(joinPdfParts(seg.parts));
+  });
+  page.segments = page.segments.filter((seg) => seg.text !== "");
+  return page;
+}
+
+// ルビ(ふりがな)の判定。旧実装は「本文より明確に小さい文字」をすべてルビとして
+// 捨てていたため、小さい文字で組まれた注記まで消えていた。本文の文字の真上に
+// 重なるように乗っている小さい文字だけをルビとみなす。
+// 行の中に小さい文字で挟まれた注記(「ゾンビ（悪魔）となった」の「（悪魔）」、
+// エンデビで確認)はベースラインがほぼ同じ高さなので、本文の文字の上端付近まで
+// 持ち上がっているものに限る。
+function isPdfRuby(it, items) {
+  return items.some((base) => {
+    if (base === it || base.size < it.size * 1.4) return false;
+    const rise = it.y - base.y;
+    if (rise < base.size * 0.6 || rise > base.size * 1.3) return false;
+    const overlap = Math.min(it.x + it.w, base.x + base.w) - Math.max(it.x, base.x);
+    return overlap > Math.min(it.w, base.w) * 0.3;
+  });
+}
+
+// 同じ塊の断片をつなぐ。英数字どうしが離れて置かれている場合だけ半角スペースを挟む
+// (日本語は断片の間にスペースを入れない)。
+function joinPdfParts(parts) {
+  let text = "";
+  let prev = null;
+  parts.forEach((p) => {
+    if (prev) {
+      const gap = p.x - (prev.x + prev.w);
+      const a = text.slice(-1);
+      const b = p.str.charAt(0);
+      if (gap > Math.max(prev.size, p.size) * 0.15 && !PDF_CJK_RE.test(a) && !PDF_CJK_RE.test(b)) {
+        text += " ";
+      }
+    }
+    text += p.str;
+    prev = p;
+  });
+  return text;
+}
+
+/* ---------- 全ページ横断: 目次・柱・ページ番号の除去 ---------- */
+
+// 全ページのうち一定割合以上で、同じ位置に同じ文字列で現れる塊を除外する。
+// ページ端の目次(インデックス)・柱・フッターなど、本文ではない繰り返し要素。
+function removeRepeatedPdfSegments(pages) {
+  if (pages.length < 4) return;
+  // 同じ文字列の塊を集め、位置の差が小さい(±3pt)ものが何ページに現れるかを数える
+  const byText = new Map();
+  pages.forEach((page, pageIndex) => {
+    page.segments.forEach((seg) => {
+      if (!byText.has(seg.text)) byText.set(seg.text, []);
+      byText.get(seg.text).push({ seg, pageIndex });
+    });
+  });
+  const threshold = Math.max(3, Math.ceil(pages.length * 0.3));
+  const repeated = new Set();
+  byText.forEach((entries) => {
+    if (entries.length < threshold) return;
+    entries.forEach((a) => {
+      const pagesSeen = new Set();
+      entries.forEach((b) => {
+        if (Math.abs(a.seg.x0 - b.seg.x0) <= 3 && Math.abs(a.seg.y - b.seg.y) <= 3) pagesSeen.add(b.pageIndex);
+      });
+      if (pagesSeen.size >= threshold) repeated.add(a.seg);
+    });
+    // 一部のページだけ数pt横にずれて描かれている場合がある(エンデビ77・78ページで確認)。
+    // 繰り返し要素と確定したものと同じ文字列で、近い位置(±10pt)にあるものも除外する。
+    const anchors = entries.filter((e) => repeated.has(e.seg));
+    if (anchors.length === 0) return;
+    entries.forEach((e) => {
+      if (anchors.some((a) => Math.abs(a.seg.x0 - e.seg.x0) <= 10 && Math.abs(a.seg.y - e.seg.y) <= 10)) {
+        repeated.add(e.seg);
+      }
+    });
+  });
+  pages.forEach((page) => {
+    page.segments = page.segments.filter((seg) => !repeated.has(seg));
+  });
+}
+
+// ページの上下12%以内にある、数字だけ(「- 12 -」「12 / 80」なども含む)の塊を
+// ページ番号とみなして除外する。旧実装のように余白の帯ごと捨てると、余白近くまで
+// 組まれた本文が改ページのたびに欠けるため、ページ番号の形をしたものに限る。
+function removePdfPageNumbers(page) {
+  const band = page.height * 0.12;
+  page.segments = page.segments.filter((seg) => {
+    const nearEdge = seg.y < band || seg.y > page.height - band;
+    const looksLikePageNumber = /^[-‐–—―\s(（]*(p\.?\s*)?\d{1,4}(\s*[\/／]\s*\d{1,4})?[-‐–—―\s)）]*$/i.test(seg.text);
+    return !(nearEdge && looksLikePageNumber);
+  });
+}
+
+/* ---------- 1ページ分: 段組みを考慮した読み順 ---------- */
+
+// 段組み・メモ欄の検出。塊の横方向の占有範囲を集計し、「ほとんどの塊が通らない
+// 縦の帯(溝)」を探す。溝の左右どちらにも文章らしい塊が十分あれば、そこで段を分ける。
+// 旧実装は溝をページ中央付近(25〜75%)に限っていたため、端に寄ったメモ欄や目次を
+// 見逃していた。段をまたぐ塊(見出しなど)が多少あっても溝として認める。
+function findPdfGutter(segments, bodySize) {
+  if (segments.length < 6) return null;
+  const minX = Math.min(...segments.map((s) => s.x0));
+  const maxX = Math.max(...segments.map((s) => s.x1));
+  const width = Math.ceil(maxX - minX);
+  if (width <= 0) return null;
+
+  const cover = new Array(width + 1).fill(0);
+  // 1pt刻みで数える。塊の端は内側に丸め、狭い溝(エンデビのメモ欄は本文と約7pt)が
+  // 丸め誤差で潰れないようにする。
+  segments.forEach((s) => {
+    for (let x = Math.ceil(s.x0 - minX); x <= Math.floor(s.x1 - minX) && x <= width; x++) cover[x]++;
+  });
+  // 段をまたいでよい塊の数(全体の1割まで)
+  const allowance = Math.floor(segments.length * 0.1);
+  const minGutter = bodySize * 0.6;
+
+  const textLike = (segs) => {
+    if (segs.length < 3) return false;
+    const lengths = segs.map((s) => s.text.length).sort((a, b) => a - b);
+    return lengths[Math.floor(lengths.length / 2)] >= 6;
+  };
+
+  let best = null;
+  const consider = (startBin, endBin) => {
+    const from = minX + startBin;
+    const to = minX + endBin;
+    if (to - from < minGutter) return;
+    const left = segments.filter((s) => s.x1 <= to);
+    const right = segments.filter((s) => s.x0 >= from);
+    if (left.length && right.length && textLike(left) && textLike(right)) {
+      const chars = (segs) => segs.reduce((a, s) => a + s.text.length, 0);
+      const score = Math.min(chars(left), chars(right));
+      if (!best || score > best.score) best = { from, to, score };
+    }
+  };
+  let runStart = -1;
+  for (let x = 0; x <= width + 1; x++) {
+    const low = x <= width && cover[x] <= allowance;
+    if (low && runStart < 0) runStart = x;
+    if (!low && runStart >= 0) {
+      // 低い帯の中でも、最も文字の通らない部分だけを溝とする。帯全体を溝にすると、
+      // 小さな囲み(数行の注記)そのものまで溝に含めてしまい、囲みの行が左右に
+      // 振り分けられてしまう(お迎えには傘が必要の1ページ目で確認)。
+      let minCover = Infinity;
+      for (let i = runStart; i < x; i++) minCover = Math.min(minCover, cover[i]);
+      let subStart = -1;
+      for (let i = runStart; i <= x; i++) {
+        const isMin = i < x && cover[i] === minCover;
+        if (isMin && subStart < 0) subStart = i;
+        if (!isMin && subStart >= 0) {
+          consider(subStart, i - 1);
+          subStart = -1;
+        }
+      }
+      runStart = -1;
     }
   }
+  return best;
+}
+
+// 段組みを考慮して塊を読み順に並べ、行の配列を返す。溝が見つかった場合は、
+// 溝をまたぐ塊(段をまたぐ見出しなど)でページを上下のブロックに区切り、
+// ブロックごとに「左の段→右の段」の順に読む。各段の中でも再帰的に溝を探す。
+function orderPdfPageLines(page) {
+  const blocks = orderPdfSegments(page.segments, page.bodySize, 0);
+  const lines = [];
+  blocks.forEach((segs) => {
+    const blockLines = segmentsToPdfLines(segs);
+    blockLines.forEach((line, i) => {
+      // ページ・段の先頭は「前の行との間隔」が測れないため、つなぐかどうかの判定は
+      // 行末の形だけで行う("soft")。
+      if (i === 0) line.boundary = "soft";
+      lines.push(line);
+    });
+  });
+  return lines;
+}
+
+function orderPdfSegments(segments, bodySize, depth) {
+  if (segments.length === 0) return [];
+  const gutter = depth < 3 ? findPdfGutter(segments, bodySize) : null;
+  if (!gutter) return [segments];
+
+  const mid = (gutter.from + gutter.to) / 2;
+  const spanning = segments.filter((s) => s.x0 < gutter.from && s.x1 > gutter.to);
+  const others = segments.filter((s) => !spanning.includes(s));
+  // 段をまたぐ塊の位置でページを上下に区切る
+  const cuts = spanning.map((s) => s.y).sort((a, b) => b - a);
+  const zoneOf = (seg) => cuts.filter((y) => seg.y < y).length;
+
+  const result = [];
+  for (let zone = 0; zone <= cuts.length; zone++) {
+    const zoneSegs = others.filter((s) => zoneOf(s) === zone);
+    const left = zoneSegs.filter((s) => (s.x0 + s.x1) / 2 < mid);
+    const right = zoneSegs.filter((s) => (s.x0 + s.x1) / 2 >= mid);
+    interleavePdfSideNotes(left, right).forEach((part) => {
+      orderPdfSegments(part, bodySize, depth + 1).forEach((b) => result.push(b));
+    });
+    if (zone < cuts.length) {
+      const cutY = cuts[zone];
+      result.push(spanning.filter((s) => s.y === cutY));
+    }
+  }
+  return result.filter((b) => b.length > 0);
+}
+
+// 右の段が本文より狭い「メモ欄・囲み」の場合は、ページの最後にまとめて置くのではなく、
+// メモのまとまりごとに、その横にある本文を読み終えた直後に置く(お迎えには傘が必要の
+// 「ロスト率」横の注記、エンデビのKP情報欄で確認)。本文の文の途中にメモが割り込まない
+// よう、本文側は「文の終わり」か「段落の空き」まで読み進めてから区切る。
+// 左右が同じくらいの幅の段組み(本文の2段組)は、従来どおり左の段→右の段の順に読む。
+function interleavePdfSideNotes(left, right) {
+  if (left.length === 0 || right.length === 0) return [left, right];
+  const widthOf = (segs) => Math.max(...segs.map((s) => s.x1)) - Math.min(...segs.map((s) => s.x0));
+  if (widthOf(right) >= widthOf(left) * 0.6) return [left, right];
+
+  const byY = (a, b) => b.y - a.y;
+  const leftSorted = [...left].sort(byY);
+  const rightSorted = [...right].sort(byY);
+
+  // メモ欄を、縦に大きく離れたところでまとまりに分ける
+  const groups = [];
+  rightSorted.forEach((seg) => {
+    const last = groups[groups.length - 1];
+    const prev = last && last[last.length - 1];
+    if (prev && prev.y - seg.y <= Math.max(prev.size, seg.size) * 2.5) last.push(seg);
+    else groups.push([seg]);
+  });
+
+  const leftGaps = [];
+  for (let i = 1; i < leftSorted.length; i++) leftGaps.push(leftSorted[i - 1].y - leftSorted[i].y);
+  const pitch = median(leftGaps.filter((g) => g > 0)) || 12;
+
+  const parts = [];
+  let li = 0;
+  groups.forEach((group) => {
+    const bottom = group[group.length - 1].y;
+    const chunk = [];
+    // メモの下端と同じ高さまでの本文
+    while (li < leftSorted.length && leftSorted[li].y >= bottom - pitch * 0.5) chunk.push(leftSorted[li++]);
+    // 文の途中なら、文の終わり・段落の空き・見出しや箇条書きの手前まで読み進める
+    while (li < leftSorted.length && chunk.length > 0) {
+      const last = chunk[chunk.length - 1];
+      const next = leftSorted[li];
+      const nextStartsNew =
+        PDF_ITEM_START_RE.test(next.text) || PDF_HEADING_START_RE.test(next.text) || /^[「『]/.test(next.text);
+      // 「」で終わる行は文の途中のこともある(「…我々が「国家」/規模になる…」)ため、
+      // 閉じかっこで区切るのは次の行が新しい台詞・項目で始まる場合に限る
+      if (/[。．！？!?…♪]$/.test(last.text)) break;
+      if (/[」』）)】]$/.test(last.text) && nextStartsNew) break;
+      if (last.y - next.y > pitch * 1.6) break;
+      if (nextStartsNew) break;
+      chunk.push(leftSorted[li++]);
+    }
+    parts.push(chunk, group);
+  });
+  parts.push(leftSorted.slice(li));
+  return parts.filter((p) => p.length > 0);
+}
+
+// 1つの段(ブロック)の塊を行にまとめ、行ごとの位置情報と、前の行との間隔から
+// 決まる区切りの種類(normal:通常の行送り / para:段落の空き)を付ける。
+function segmentsToPdfLines(segments) {
+  const rows = [];
+  [...segments]
+    .sort((a, b) => b.y - a.y || a.x0 - b.x0)
+    .forEach((seg) => {
+      const row = rows.find((r) => Math.abs(r.y - seg.y) <= Math.max(r.size, seg.size) * 0.5);
+      if (row) {
+        row.segs.push(seg);
+        row.size = Math.max(row.size, seg.size);
+      } else {
+        rows.push({ y: seg.y, size: seg.size, segs: [seg] });
+      }
+    });
+
+  const lines = rows.map((row) => {
+    row.segs.sort((a, b) => a.x0 - b.x0);
+    // 同じ段の中で横に離れた塊(表の項目と値など)は、全角スペースで区切って1行にする
+    const text = row.segs.map((s) => s.text).join("　");
+    return {
+      text,
+      y: row.y,
+      size: row.size,
+      x0: row.segs[0].x0,
+      x1: Math.max(...row.segs.map((s) => s.x1)),
+      boundary: "normal",
+    };
+  });
+  if (lines.length === 0) return lines;
+
+  const pitches = [];
+  for (let i = 1; i < lines.length; i++) {
+    const g = lines[i - 1].y - lines[i].y;
+    if (g > 0) pitches.push(g / lines[i].size);
+  }
+  // 行送りは文字サイズに対する比で見る(見出しなど大きい文字の行が混ざっても崩れないように)
+  const typicalPitch = median(pitches) || 1.5;
+  const right = Math.max(...lines.map((l) => l.x1));
+  lines.forEach((line, i) => {
+    // 1行しかない段(見出しなど)は、行末が揃っているかを比べる相手がいないので
+    // 「行末まで詰まっている」とはみなさない。
+    // 禁則処理(行頭に来られない文字の追い出し)で、折り返した行でも1〜2文字分
+    // 手前で終わることがあるため、2.5文字分の余裕をみる(イクテュエスで確認)。
+    line.full = lines.length >= 2 && line.x1 >= right - line.size * 2.5;
+    if (i === 0) return;
+    const pitch = (lines[i - 1].y - line.y) / line.size;
+    if (pitch > typicalPitch * 1.6) line.boundary = "para";
+  });
+  return lines;
+}
+
+/* ---------- 全ページ横断: 行をつないで本文にする ---------- */
+
+// 文の終わりとみなす行末
+const PDF_TERMINAL_RE = /[。．！？!?」』）)】〉》〕…‥♪☆★]$/;
+// 箇条書き・項目の始まりとみなす行頭
+const PDF_ITEM_START_RE = /^([・●○〇◯■□◆◇▼▽▲△▶▷►★☆※→⇒↓↑←⇩＊*♦•◎✓]|\d+[\.．)）]|[０-９]+[．）]|[①-⑳]|[【《〈])/;
+// 見出しに使われやすい記号で始まる行
+const PDF_HEADING_START_RE = /^[■□◆◇▼▽▲△▶▷►★☆●○◎【《〈｜|]/;
+// 「」『』(で始まる行(台詞など)
+const PDF_BRACKET_START_RE = /^[「『（(〔]/;
+// 「項目名：値」の形の行(直前の行とはつながない)
+const PDF_LABEL_LINE_RE = /^[^。、]{1,12}[：:]/;
+// 目次の行(「見出し ──── 12」)
+const PDF_TOC_LINE_RE = /([─―…‥・.．]{3,}|[─―]{2,})\s*\d+$/;
+
+function joinPdfLines(lines) {
+  let result = "";
+  let prev = null;
+  lines.forEach((line) => {
+    if (!prev) {
+      result = line.text;
+      prev = line;
+      return;
+    }
+    let sep = pdfLineSeparator(prev, line);
+    // 英文の行どうしをつなぐときは、単語がくっつかないよう半角スペースを挟む
+    if (sep === "" && /[A-Za-z0-9.,;:!?)]$/.test(prev.text) && /^[A-Za-z0-9(]/.test(line.text)) sep = " ";
+    result += sep + line.text;
+    prev = line;
+  });
   return result;
+}
+
+// 前の行と次の行の間に入れる区切り("":つなぐ / "\n":改行 / "\n\n":段落)を決める。
+function pdfLineSeparator(prev, cur) {
+  if (cur.boundary === "para") return "\n\n";
+  const prevEnd = prev.text;
+  const terminal = PDF_TERMINAL_RE.test(prevEnd);
+  const itemStart = PDF_ITEM_START_RE.test(cur.text) || PDF_LABEL_LINE_RE.test(cur.text);
+  const bracketStart = PDF_BRACKET_START_RE.test(cur.text);
+  const toc = PDF_TOC_LINE_RE.test(prevEnd);
+  // 文字サイズが明らかに違う行(見出しと本文など)はつながない
+  const sameSize = Math.abs(prev.size - cur.size) <= Math.min(prev.size, cur.size) * 0.15;
+
+  // 行末まで文字が詰まっている行は、折り返しとみなして次の行とつなぐ。
+  // ただし、文が終わっていて次が台詞や箇条書きで始まる場合は区切る。
+  const continues = sameSize && prev.full && !toc && !itemStart && !(terminal && bracketStart);
+
+  if (cur.boundary === "soft") {
+    // ページ・段の変わり目: 文の途中で切れているときだけつなぐ
+    return continues ? "" : "\n\n";
+  }
+  if (continues) return "";
+  if (!sameSize || terminal || toc || itemStart) return "\n";
+  // 「■描写」「〇PCが〜に気がつく」のような見出し・項目の行は、読点で終わっていない
+  // 限り次の行とつながない(お迎えには傘が必要で確認)
+  if ((PDF_HEADING_START_RE.test(prevEnd) || PDF_ITEM_START_RE.test(prevEnd)) && !/[、，,]$/.test(prevEnd)) return "\n";
+  // 行末まで届いていないが文が終わっていない行(手動の改行)。
+  // 読点で終わる行・十分に長い行は文の途中とみなしてつなぐ。見出しのような
+  // 短い行や「項目名：値」の行は改行のまま残す。
+  if (PDF_LABEL_LINE_RE.test(prevEnd)) return "\n";
+  if (/[、，,]$/.test(prevEnd)) return bracketStart ? "\n" : "";
+  if (prevEnd.length >= 15 && !bracketStart) return "";
+  return "\n";
 }
 
 function median(nums) {
