@@ -56,6 +56,7 @@ const el = {
   btnUndo: document.getElementById("btn-undo"),
   btnFindToggle: document.getElementById("btn-find-toggle"),
   btnInsertEmptyLine: document.getElementById("btn-insert-empty-line"),
+  btnSplitCopy: document.getElementById("btn-split-copy"),
   findBar: document.getElementById("find-bar"),
   findInput: document.getElementById("find-input"),
   btnFindRun: document.getElementById("btn-find-run"),
@@ -1284,6 +1285,42 @@ el.btnInsertEmptyLine.addEventListener("mousedown", (e) => {
     : null;
 });
 
+// カーソルがコピー範囲の先頭(1段落目の文頭)にあれば、そのコピー範囲(.cp-wrap)を返す。
+// Enterで分けたコピー範囲の2段落目以降(前の段落に同じコピー範囲が続いている)は対象外。
+function copyWrapStartingAtCaret(range) {
+  if (!range.collapsed) return null;
+  const wrap = findAncestorMark(range.startContainer, (n) => n.classList && n.classList.contains("cp-wrap"));
+  if (!wrap) return null;
+  const target = wrap.querySelector(".cp-target");
+  if (!target) return null;
+  const atStart = target.contains(range.startContainer)
+    ? caretIsAtBlockStart(range, target)
+    : range.startContainer === wrap && range.startOffset === 0;
+  if (!atStart) return null;
+  const chain = Array.from(el.editorBody.querySelectorAll(`.cp-wrap[data-cpid="${wrap.dataset.cpid}"]`));
+  return chain[0] === wrap ? wrap : null;
+}
+
+// 段落 block の前後の段落が同じコピー範囲(同じcpid)でつながっていれば、そのcpidを返す。
+function sharedCopyRangeAround(block) {
+  const prev = block.previousElementSibling;
+  const next = block.nextElementSibling;
+  if (!prev || !next) return null;
+  const prevWraps = prev.querySelectorAll(".cp-wrap");
+  const nextWrap = next.querySelector(".cp-wrap");
+  const lastPrev = prevWraps[prevWraps.length - 1];
+  if (!lastPrev || !nextWrap) return null;
+  return lastPrev.dataset.cpid && lastPrev.dataset.cpid === nextWrap.dataset.cpid ? lastPrev.dataset.cpid : null;
+}
+
+// block の先頭から node の直前までの範囲。
+function rangeBeforeNode(node, block) {
+  const r = document.createRange();
+  r.setStart(block, 0);
+  r.setEndBefore(node);
+  return r;
+}
+
 el.btnInsertEmptyLine.addEventListener("click", () => {
   if (!state.loaded) return;
   const range = insertEmptyLineRange;
@@ -1294,24 +1331,174 @@ el.btnInsertEmptyLine.addEventListener("click", () => {
   const anchor = (block && block !== el.editorBody) ? block : el.editorBody.lastElementChild;
   if (!anchor) return;
 
-  const insertBefore = range && anchor === closestBlock(range.startContainer) && caretIsAtBlockStart(range, anchor);
+  // コピー範囲の先頭にカーソルがあるときは、コピー範囲の直前に空行を挟む
+  // (2026-09-28、Mikoto報告: コピー範囲が段落の途中から始まっていると、段落の先頭では
+  // ないと判定されて空行が段落の後ろ=コピー範囲の1段落目と2段落目の間に入り、
+  // コピー範囲が分断されていた)。コピー範囲の前に同じ段落の文章があれば、そこで段落を
+  // 分けてから間に空行を入れる。
+  const copyWrap = range ? copyWrapStartingAtCaret(range) : null;
+  const splitBeforeCopy = !!(copyWrap && copyWrap.parentNode === anchor
+    && rangeTextForPosition(rangeBeforeNode(copyWrap, anchor)) !== "");
+  const insertBefore = !!copyWrap
+    || (range && anchor === closestBlock(range.startContainer) && caretIsAtBlockStart(range, anchor));
   const blank = document.createElement(anchor.tagName === "DIV" ? "div" : "p");
   blank.appendChild(document.createElement("br"));
   // splitPlainBlockAtCaretと同じ理由で、見出しレベルのインデントを引き継ぐ。
   blank.style.marginLeft = anchor.style.marginLeft;
 
   pushUndoSnapshot();
+  if (splitBeforeCopy) {
+    const head = document.createElement(anchor.tagName === "DIV" ? "div" : "p");
+    head.style.marginLeft = anchor.style.marginLeft;
+    while (anchor.firstChild && anchor.firstChild !== copyWrap) head.appendChild(anchor.firstChild);
+    trimTrailingLineBreaks(head);
+    anchor.parentNode.insertBefore(head, anchor);
+  }
   anchor.parentNode.insertBefore(blank, insertBefore ? anchor : anchor.nextSibling);
+
+  // 複数段落にまたがるコピー範囲の段落と段落の間に入る場合は、空行も同じコピー範囲の
+  // 一部にして、コピー範囲が分かれないようにする(2026-09-28、Mikoto要望)。
+  let caretHost = blank;
+  const chainId = sharedCopyRangeAround(blank);
+  if (chainId) {
+    blank.textContent = "";
+    const wrap = wrapAsCpTarget(document.createDocumentFragment(), chainId);
+    const target = wrap.querySelector(".cp-target");
+    ensureCopyTargetHeight(target);
+    blank.appendChild(wrap);
+    syncCopyWrapChain(chainId);
+    caretHost = target;
+  }
 
   const sel = window.getSelection();
   const caret = document.createRange();
-  caret.setStart(blank, 0);
+  caret.setStart(caretHost, 0);
   caret.collapse(true);
   sel.removeAllRanges();
   sel.addRange(caret);
 
   scheduleAutoRender();
 });
+
+/* ============================================================
+ * コピー範囲の分割(5.12、2026-09-28、Mikoto要望)
+ *
+ * 1つのコピー範囲を、カーソルの位置で2つの別々のコピー範囲(それぞれにコピーボタン)に
+ * 分ける。以前は、いったん全体を解除してから2つの範囲を設定し直す必要があった。
+ * 段落の途中にカーソルがあれば、その位置で段落ごと分ける(Enterによる分割と同じ
+ * splitCopyWrapAtCaretを使う)。段落の先頭・末尾にカーソルがあれば、文章は分けずに
+ * その段落の前・後ろの境目で分ける。後半側には新しいcpidを振る。
+ * 操作方法は空行挿入ボタンと同じく、カーソル位置をmousedownの時点で保持しておく。
+ * ========================================================== */
+
+let splitCopyRange = null;
+el.btnSplitCopy.addEventListener("mousedown", (e) => {
+  if (e.cancelable) e.preventDefault();
+  const sel = window.getSelection();
+  splitCopyRange = sel && sel.rangeCount > 0 && el.editorBody.contains(sel.getRangeAt(0).startContainer)
+    ? sel.getRangeAt(0).cloneRange()
+    : null;
+});
+
+el.btnSplitCopy.addEventListener("click", () => {
+  if (!state.loaded) return;
+  const range = splitCopyRange;
+  splitCopyRange = null;
+  // 範囲選択が残っていても、選択中の文字を消さないよう開始位置のカーソルとして扱う
+  if (range && !range.collapsed) range.collapse(true);
+  const wrap = range && findAncestorMark(range.startContainer, (n) => n.classList && n.classList.contains("cp-wrap"));
+  const target = wrap && wrap.querySelector(".cp-target");
+  if (!target || !target.contains(range.startContainer)) {
+    showToast("コピー範囲の中の、分けたい位置にカーソルを置いてから押してください", true);
+    return;
+  }
+  const oldId = wrap.dataset.cpid;
+  const chain = () => Array.from(el.editorBody.querySelectorAll(`.cp-wrap[data-cpid="${oldId}"]`));
+  const idx = chain().indexOf(wrap);
+  const atStart = caretIsAtBlockStart(range, target);
+  const atEnd = !hasLineContentAfterCaret(range, target);
+
+  // 後半側の先頭になるコピー範囲の段落を決める
+  let firstOfSecond = null;
+  if (atStart) {
+    firstOfSecond = idx > 0 ? wrap : null;
+  } else if (atEnd) {
+    firstOfSecond = chain()[idx + 1] || null;
+  } else {
+    firstOfSecond = "split";
+  }
+  if (!firstOfSecond) {
+    showToast("コピー範囲の先頭・末尾では分割できません。途中にカーソルを置いてください", true);
+    return;
+  }
+
+  pushUndoSnapshot();
+  if (firstOfSecond === "split") {
+    const p = wrap.parentNode;
+    if (!splitCopyWrapAtCaret(wrap, range)) return;
+    const newP = p.nextSibling;
+    // コピー範囲の後ろに同じ段落の文章が続いていた場合は、後半側の段落へ一緒に移す
+    while (wrap.nextSibling) {
+      if (wrap.nextSibling.classList && wrap.nextSibling.classList.contains("cp-btn")) { wrap.nextSibling.remove(); continue; }
+      newP.appendChild(wrap.nextSibling);
+    }
+    firstOfSecond = newP.querySelector(".cp-wrap");
+  }
+
+  cpCounter++;
+  const newId = "cp_" + cpCounter + "_" + Date.now().toString(36);
+  const all = chain();
+  all.slice(all.indexOf(firstOfSecond)).forEach((w) => {
+    w.dataset.cpid = newId;
+    w.querySelectorAll("[data-cpid]").forEach((n) => { n.dataset.cpid = newId; });
+  });
+  syncCopyWrapChain(oldId);
+  syncCopyWrapChain(newId);
+
+  const newTarget = firstOfSecond.querySelector(".cp-target");
+  const sel = window.getSelection();
+  const caret = document.createRange();
+  caret.setStart(newTarget, 0);
+  caret.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(caret);
+
+  showToast("コピー範囲を2つに分割しました");
+  scheduleAutoRender();
+});
+
+/* ============================================================
+ * リボンを常に画面上部に表示する(5.3、2026-09-28、Mikoto要望・iPhone/iPad実機)
+ *
+ * ヘッダー・リボン・検索バー(.app-chrome)はposition: stickyで上部に固定しているが、
+ * iOS/iPadOSのSafariはキーボードを表示している間、ページ全体(レイアウトビューポート)
+ * ではなく実際に見えている領域(ビジュアルビューポート)だけを動かしてスクロールする。
+ * stickyはレイアウトビューポートの上端に張り付くため、見えている領域の上に隠れてしまい、
+ * リボンを使うたびに上へ余計にスクロールする必要があった。見えている領域が
+ * ずれている分(visualViewport.offsetTop)だけ.app-chromeを下へずらして追従させる。
+ * ========================================================== */
+
+(() => {
+  const vv = window.visualViewport;
+  const chrome = document.getElementById("app-chrome");
+  if (!vv || !chrome) return;
+  let queued = false;
+  const sync = () => {
+    queued = false;
+    const offset = Math.max(0, Math.round(vv.offsetTop));
+    chrome.style.transform = offset > 0 ? `translateY(${offset}px)` : "";
+  };
+  const schedule = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(sync);
+    // アプリ切り替え直後などでrAFが発火しない場合の保険(ログ検索インデックスのafterLayoutと同じ考え方)
+    setTimeout(() => { if (queued) sync(); }, 100);
+  };
+  vv.addEventListener("scroll", schedule);
+  vv.addEventListener("resize", schedule);
+  window.addEventListener("scroll", schedule, { passive: true });
+})();
 
 /* ============================================================
  * 検索・一括置換バー(5.16)
@@ -1590,7 +1777,25 @@ const ribbonActionBtns = Array.from(el.miniToolbar.querySelectorAll("button[data
 document.addEventListener("selectionchange", () => {
   captureCurrentSelectionIfAny();
   updateRibbonActionButtons();
+  updateSplitCopyButton();
 });
+
+// コピー範囲の分割ボタン(5.12)は、コピー範囲の中にカーソルがある(文字を選択していない)
+// ときだけ押せるようにする(2026-09-28、Mikoto要望)。範囲選択中に押すと
+// splitCopyWrapAtCaretが選択中の文字を消してしまうため、範囲選択中も押せない。
+let splitCopyEnabled = null;
+function updateSplitCopyButton() {
+  let enabled = false;
+  const sel = window.getSelection();
+  if (state.mode === "edit" && sel && sel.rangeCount > 0 && sel.isCollapsed) {
+    const node = sel.getRangeAt(0).startContainer;
+    enabled = el.editorBody.contains(node)
+      && !!findAncestorMark(node, (n) => n.classList && n.classList.contains("cp-target"));
+  }
+  if (enabled === splitCopyEnabled) return;
+  splitCopyEnabled = enabled;
+  el.btnSplitCopy.disabled = !enabled;
+}
 
 function captureCurrentSelectionIfAny() {
   if (state.mode !== "edit") return;
@@ -1625,6 +1830,7 @@ function updateRibbonVisibility() {
   if (state.mode !== "edit" && !el.findBar.hidden) setFindBarOpen(false);
   savedRange = null;
   updateRibbonActionButtons();
+  updateSplitCopyButton();
   updateUndoButton();
 }
 
@@ -1802,6 +2008,7 @@ function performUndo() {
   window.getSelection().removeAllRanges();
   savedRange = null;
   updateRibbonActionButtons();
+  updateSplitCopyButton();
   updateUndoButton();
   syncAllHeadingIndents();
   scheduleAutoRender();
@@ -2402,6 +2609,10 @@ function splitPlainBlockAtCaret(block, range) {
 
   const newBlock = document.createElement(tagName);
   newBlock.appendChild(tailFragment);
+  // 見出しの中で分割すると、extractContentsが見出しの印(.h-mark)を同じIDのまま
+  // 複製して新しい段落に持ち込み、空の見出しができてしまう(2026-09-28、Mikoto報告)。
+  // 見出しは段落1つにつき1つなので、新しい段落側の印は外して本文にする。
+  newBlock.querySelectorAll(".h-mark").forEach((m) => m.replaceWith(...m.childNodes));
   // アウトラインの見出しレベルに応じたインデント(margin-left、updateHeadingIndent
   // 参照)は段落ごとのインラインstyleで持っているため、新しく作る段落にも
   // 分割元の段落から引き継がないと、レベル2以下の章で段落分けした瞬間に
@@ -2428,6 +2639,36 @@ function splitPlainBlockAtCaret(block, range) {
   sel.addRange(caret);
 }
 
+// カーソルから container の終わりまでに文字が残っているか(<br>は数えない)。
+function hasLineContentAfterCaret(range, container) {
+  const after = document.createRange();
+  try {
+    after.setStart(range.startContainer, range.startOffset);
+    after.setEnd(container, container.childNodes.length);
+  } catch (err) {
+    return true;
+  }
+  return rangeTextForPosition(after) !== "";
+}
+
+// 見出し段落のすぐ後ろに空の本文段落を作り、そこへカーソルを移す。
+function insertParagraphAfterHeading(hmark) {
+  const block = closestBlock(hmark);
+  // 見出しの中に残っている改行(以前のEnterで入ったもの)は不要なので落とす
+  trimTrailingLineBreaks(hmark);
+  const newBlock = document.createElement(block.tagName === "DIV" ? "div" : "p");
+  newBlock.style.marginLeft = block.style.marginLeft; // 見出しと同じインデント(updateHeadingIndent参照)
+  ensureBlockHeight(newBlock);
+  block.parentNode.insertBefore(newBlock, block.nextSibling);
+
+  const sel = window.getSelection();
+  const caret = document.createRange();
+  caret.setStart(newBlock, 0);
+  caret.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(caret);
+}
+
 el.editorBody.addEventListener("beforeinput", (e) => {
   if (e.inputType !== "insertParagraph") return;
   const sel = window.getSelection();
@@ -2440,6 +2681,17 @@ el.editorBody.addEventListener("beforeinput", (e) => {
 
   e.preventDefault();
   pushUndoSnapshot();
+
+  // 見出しの末尾でのEnterは、見出しの中に改行を入れず、すぐ次に本文の段落を作る
+  // (2026-09-28、Mikoto報告: 見出しの末尾で段落分けすると、新しい段落の先頭に
+  // 空の見出しの印が残っていた。見出しの末尾では段落分けのみで構わない、とのこと)。
+  const hmark = findAncestorMark(range.startContainer, (n) => n.classList && n.classList.contains("h-mark"));
+  if (hmark && range.collapsed && !hasLineContentAfterCaret(range, hmark)) {
+    insertParagraphAfterHeading(hmark);
+    scheduleAutoRender();
+    return;
+  }
+
   if (!startNewParagraph) {
     insertLineBreakAtCaret(range);
   } else {
@@ -2480,12 +2732,88 @@ function caretIsAtBlockStart(range, block) {
   return (holder.textContent || "") === "";
 }
 
+// コピー範囲の先頭でのバックスペース(2026-09-28、Mikoto要望)。
+//
+// 以前は、コピー範囲の先頭の文章が直前の文章の末尾につながる一方で、つながった
+// 文章がコピー範囲の外に出てしまっていた。コピー範囲の先頭でバックスペースを押すのは
+// 直前の文章もコピー範囲に入れたいときが多いため、逆に直前の文章をコピー範囲の中へ
+// 取り込む。段落の区切りと同じく、1回目は改行した状態で取り込み(mergeBlocks参照)、
+// 2回目(ブラウザ既定の改行削除)で1行につながる。
+//
+// 取り込む対象は、同じ段落の中でコピー範囲の直前にある1行分、それが無ければ直前の
+// 段落まるごと。見出し・別のコピー範囲は取り込まない(その場合はnullを返し、従来の
+// 処理に任せる。Enterで分けた同じコピー範囲の結合はmergeBlocksの特例が扱う)。
+// 実行する処理を関数で返すのは、DOMを変える前にpreventDefaultとUndoの記録を
+// 済ませるため。
+function planPullIntoCopyRange(range) {
+  const wrap = findAncestorMark(range.startContainer, (n) => n.classList && n.classList.contains("cp-wrap"));
+  if (!wrap) return null;
+  const target = wrap.querySelector(".cp-target");
+  if (!target || !target.contains(range.startContainer)) return null;
+  if (!caretIsAtBlockStart(range, target)) return null;
+  const block = closestBlock(wrap);
+  if (!block || block === el.editorBody || wrap.parentNode !== block) return null;
+
+  const isStructural = (n) => n.nodeType === 1 && (n.matches(".h-mark, .cp-wrap") || n.querySelector(".h-mark, .cp-wrap"));
+
+  // 同じ段落の中で、コピー範囲の直前にある1行分
+  const lineNodes = [];
+  let n = wrap.previousSibling;
+  while (n && n.nodeName !== "BR") {
+    if (isStructural(n)) return null;
+    lineNodes.unshift(n);
+    n = n.previousSibling;
+  }
+  const lineBreakBefore = n; // その行を終えていた<br>(無ければnull)
+  const lineText = lineNodes.map((x) => x.textContent || "").join("");
+
+  let nodes;
+  let cleanup;
+  if (lineText.trim() !== "") {
+    nodes = lineNodes;
+    // 取り込んだ行の前にあった<br>は、コピー範囲(見た目はブロック)の直前で不要になる
+    cleanup = () => { if (lineBreakBefore) lineBreakBefore.remove(); };
+  } else if (!lineBreakBefore) {
+    // コピー範囲が段落の先頭にある: 直前の段落まるごと
+    const prev = block.previousElementSibling;
+    if (!prev || (prev.tagName !== "P" && prev.tagName !== "DIV")) return null;
+    if (isStructural(prev)) return null;
+    if ((prev.textContent || "").trim() === "") return null;
+    trimTrailingLineBreaks(prev);
+    nodes = Array.from(prev.childNodes);
+    cleanup = () => prev.remove();
+  } else {
+    return null; // 直前が空行: 従来どおり
+  }
+
+  return () => {
+    const frag = document.createDocumentFragment();
+    nodes.forEach((x) => frag.appendChild(x));
+    lineNodes.filter((x) => !nodes.includes(x)).forEach((x) => x.remove()); // 空白だけのテキストノード
+    cleanup();
+    const br = document.createElement("br");
+    target.insertBefore(br, target.firstChild);
+    target.insertBefore(frag, br);
+    syncCopyWrapChain(wrap.dataset.cpid);
+    placeCaretAfter(br);
+  };
+}
+
 el.editorBody.addEventListener("beforeinput", (e) => {
   if (e.inputType !== "deleteContentBackward") return;
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) return;
   const range = sel.getRangeAt(0);
   if (!range.collapsed || !el.editorBody.contains(range.startContainer)) return;
+
+  const pull = planPullIntoCopyRange(range);
+  if (pull) {
+    e.preventDefault();
+    pushUndoSnapshot();
+    pull();
+    scheduleAutoRender();
+    return;
+  }
 
   const block = closestBlock(range.startContainer);
   if (!block || block === el.editorBody) return;
@@ -2675,8 +3003,11 @@ function copyTargetText(target) {
 }
 
 // コピー範囲1つ分をつなげたテキスト。末尾に空行が残っていても持ち出さない。
+// 中身の無い段落(空行挿入ボタンで作った空行が残ったものなど)は飛ばし、
+// 「段落+空行+段落」も通常の段落どうしと同じく空行1行でつなぐ(2026-09-28、Mikoto要望)。
 function copyRangeText(spans) {
-  return Array.from(spans).map(copyTargetText).join(COPY_BUTTON_LINE_SEPARATOR).replace(/\s+$/, "");
+  return Array.from(spans).map(copyTargetText).filter((t) => t.trim() !== "")
+    .join(COPY_BUTTON_LINE_SEPARATOR).replace(/\s+$/, "");
 }
 
 // コピペボタンのクリックはエディタ・プレビューどちらでも動作させる(委譲リスナー)。

@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#ff9500" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-title" content="シナリオ整形ツール" />
-<link rel="stylesheet" href="style.css?v=12" />
+<link rel="stylesheet" href="style.css?v=13" />
 </head>
 <body class="mode-edit">
 
@@ -30,17 +30,23 @@
      追従するミニツールバーがOS標準のコピー&ペーストのポップアップと重なってタップ
      できなくなる不具合が判明したため、2026-07-25にこの形式に変更した) -->
 <div class="mini-toolbar" id="mini-toolbar" hidden>
-  <button type="button" id="btn-undo" title="元に戻す" disabled>↩️元に戻す</button>
+  <!-- 狭い画面で多くのボタンを横スクロールせずに届かせるため、アイコンのみの表示にしている
+       (2026-09-28、Mikoto要望)。ボタンの名前はtitle・aria-labelで持たせる。アイコンはMikoto作成の
+       PNG(1色・背景透明)を、CSSのマスクとしてボタンの文字色で塗って表示する(style.cssの.ribbon-icon参照)。 -->
+  <button type="button" id="btn-undo" title="元に戻す" aria-label="元に戻す" disabled><span class="ribbon-icon ribbon-icon--undo"></span></button>
   <!-- サイドバーが長くなりすぎたため、旧「編集ツール」セクションの機能をここへ移した
        (2026-07-27、Mikoto要望)。選択範囲を必要としない操作なので data-action は付けず、
        常時押せるようにしている。狭い画面でもスクロールせず届くよう前方に置く。 -->
-  <button type="button" id="btn-find-toggle" title="検索・一括置換">🔍</button>
-  <button type="button" id="btn-insert-empty-line" title="カーソル位置に空行を挿入">空行挿入</button>
+  <button type="button" id="btn-find-toggle" title="検索・一括置換" aria-label="検索・一括置換"><span class="ribbon-icon ribbon-icon--find"></span></button>
+  <button type="button" id="btn-insert-empty-line" title="カーソル位置に空行を挿入" aria-label="空行挿入"><span class="ribbon-icon ribbon-icon--empty-line"></span></button>
   <span class="mini-toolbar__sep"></span>
-  <button type="button" data-action="heading" title="見出しにする" disabled>見出し</button>
-  <button type="button" data-action="copybtn" title="コピペボタン設置" disabled>📋+</button>
-  <button type="button" data-action="npc" title="選択範囲からNPCカードを作成" disabled>👤</button>
-  <button type="button" data-action="link" title="内部リンクを設定" disabled>🔗</button>
+  <button type="button" data-action="heading" title="見出しにする" aria-label="見出し" disabled><span class="ribbon-icon ribbon-icon--heading"></span></button>
+  <button type="button" data-action="copybtn" title="コピペボタン設置" aria-label="コピペボタン設置" disabled><span class="ribbon-icon ribbon-icon--copybtn"></span></button>
+  <!-- コピー範囲の分割(5.12)。選択範囲ではなくカーソル位置で動くため data-action は持たず、
+       コピー範囲の中にカーソルがあるときだけ押せる(updateSplitCopyButton) -->
+  <button type="button" id="btn-split-copy" title="カーソル位置でコピー範囲を2つに分割" aria-label="コピー範囲を分割" disabled><span class="ribbon-icon ribbon-icon--split"></span></button>
+  <button type="button" data-action="npc" title="選択範囲からNPCカードを作成" aria-label="NPCカード化" disabled><span class="ribbon-icon ribbon-icon--npc"></span></button>
+  <button type="button" data-action="link" title="内部リンクを設定" aria-label="リンク" disabled><span class="ribbon-icon ribbon-icon--link"></span></button>
   <span class="mini-toolbar__sep"></span>
   <button type="button" data-action="bold" title="太字" disabled><b>B</b></button>
   <button type="button" data-action="italic" title="イタリック" disabled><i>I</i></button>
@@ -147,6 +153,6 @@
 <div class="toast" id="toast" hidden></div>
 
 <script src="vendor/pdfjs/pdf.min.js"></script>
-<script src="app.js?v=27"></script>
+<script src="app.js?v=28"></script>
 </body>
 </html>
