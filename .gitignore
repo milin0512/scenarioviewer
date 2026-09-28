@@ -8,6 +8,8 @@
 *.txt
 /*.html
 !/index.html
+# 取扱説明書のWeb版(2026-09-29追加)。シナリオ本文は含まないため公開してよい
+!/manual.html
 
 # OS・エディタの生成ファイル
 .DS_Store

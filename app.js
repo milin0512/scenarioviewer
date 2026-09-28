@@ -1296,6 +1296,15 @@ function renderFileToolsView(container) {
     el.fileInput.click();
   });
   container.appendChild(reloadBtn);
+
+  // 取扱説明書(manual.html)はメニューの最下部から別タブで開く(2026-09-29、Mikoto要望。CClogと同じ形式)
+  const manualLink = document.createElement("a");
+  manualLink.className = "btn btn--secondary btn--block";
+  manualLink.href = "manual.html";
+  manualLink.target = "_blank";
+  manualLink.rel = "noopener";
+  manualLink.textContent = "📖 取扱説明書を開く";
+  container.appendChild(manualLink);
 }
 
 function buildSidebarSection(title, renderFn) {
