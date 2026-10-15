@@ -1579,6 +1579,11 @@ el.btnSplitCopy.addEventListener("click", () => {
  * 現れる」になっていた(推測)。(1)実際に位置・高さが変わっていないイベントは無視する、
  * (2)止まったと判断するまでの待ち時間を延ばす、(3)再表示直後のしばらくの間は、小さな
  * 動きなら隠さずにそのまま位置だけ合わせる(大きく動いたときだけ隠す)、の3点で抑える。
+ *
+ * 指で止めたときのちかちか対策(2026-10-16、Mikoto報告・iPhone実機、キーボード表示中の
+ * 上向きスクロール): 指を画面に置いたまま止めると、その間に「止まった」と判断して再表示し、
+ * 指を離した瞬間にSafariが位置を調整して動いたため、また隠し直していた(推測)。
+ * 指が画面に触れている間は再表示せず、指を離してから止まったと判断するようにした。
  * ========================================================== */
 
 (() => {
@@ -1591,6 +1596,7 @@ el.btnSplitCopy.addEventListener("click", () => {
   let settleTimer = null;
   let shownAt = 0;
   let prev = null;
+  let touching = false;       // 指が画面に触れているか
 
   // 見えている領域の位置・高さ。前回のイベントと比べて実際に動いたかを判定する
   const snap = () => ({ top: vv.pageTop, off: vv.offsetTop, h: vv.height });
@@ -1620,6 +1626,12 @@ el.btnSplitCopy.addEventListener("click", () => {
     prev = snap();
   };
 
+  // 止まったと判断したときの再表示。指が触れている間は出さず、指を離したときにやり直す
+  const settle = () => {
+    if (touching) return;
+    place();
+  };
+
   const onMove = () => {
     if (isKeyboardShown()) {
       const now = snap();
@@ -1635,7 +1647,7 @@ el.btnSplitCopy.addEventListener("click", () => {
         // スクロール中は位置を動かさずに隠し、止まってから置き直す
         chrome.classList.add("is-scroll-hidden");
       }
-      settleTimer = setTimeout(place, SETTLE_MS);
+      settleTimer = setTimeout(settle, SETTLE_MS);
     } else {
       clearTimeout(settleTimer);
       prev = null;
@@ -1652,6 +1664,16 @@ el.btnSplitCopy.addEventListener("click", () => {
     clearTimeout(settleTimer);
     settleTimer = setTimeout(place, SETTLE_MS);
   });
+  // 指の接触を追跡する。隠している間に指を離したら、そこから改めて止まるのを待つ
+  document.addEventListener("touchstart", () => { touching = true; }, { passive: true, capture: true });
+  const onTouchEnd = (e) => {
+    touching = e.touches.length > 0;
+    if (touching || !chrome.classList.contains("is-scroll-hidden")) return;
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(settle, SETTLE_MS);
+  };
+  document.addEventListener("touchend", onTouchEnd, { passive: true, capture: true });
+  document.addEventListener("touchcancel", onTouchEnd, { passive: true, capture: true });
 })();
 
 /* ============================================================
