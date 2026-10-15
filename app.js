@@ -1565,28 +1565,58 @@ el.btnSplitCopy.addEventListener("click", () => {
  * stickyはレイアウトビューポートの上端に張り付くため、見えている領域の上に隠れてしまい、
  * リボンを使うたびに上へ余計にスクロールする必要があった。見えている領域が
  * ずれている分(visualViewport.offsetTop)だけ.app-chromeを下へずらして追従させる。
+ *
+ * 高速スクロール時のちらつき対策(2026-10-16、Mikoto報告):
+ * Safariはスクロールの描画をJavaScriptより先に進めるため、スクロール中に毎回位置を
+ * 補正すると数コマ遅れ、リボンが本文と一緒に流れては戻るのを繰り返してちらついていた
+ * (キーボードを出していないときも同じ症状が出ていた)。そこで、(1)キーボードを
+ * 出していない間は補正せずstickyだけに任せ、(2)キーボードを出している間は
+ * スクロール中のリボンを隠し、止まってから正しい位置に置き直して再表示する(Mikoto選択)。
  * ========================================================== */
 
 (() => {
   const vv = window.visualViewport;
   const chrome = document.getElementById("app-chrome");
   if (!vv || !chrome) return;
-  let queued = false;
-  const sync = () => {
-    queued = false;
-    const offset = Math.max(0, Math.round(vv.offsetTop));
+  const SETTLE_MS = 150;
+  let settleTimer = null;
+
+  // ソフトウェアキーボードを出しているか。入力欄・本文にフォーカスがあり、かつ見えている
+  // 領域が縦に縮んでいる(またはずれている)ときだけtrue。iPadの外付けキーボードのように
+  // 領域が縮まない場合はstickyだけで足りるため、補正も非表示もしない。
+  const isKeyboardShown = () => {
+    const a = document.activeElement;
+    const editing = !!a && (a.isContentEditable || a.tagName === "INPUT" || a.tagName === "TEXTAREA");
+    if (!editing) return false;
+    return vv.offsetTop > 0 || window.innerHeight - vv.height > 80;
+  };
+
+  const place = () => {
+    const offset = isKeyboardShown() ? Math.max(0, Math.round(vv.offsetTop)) : 0;
     chrome.style.transform = offset > 0 ? `translateY(${offset}px)` : "";
+    chrome.classList.remove("is-scroll-hidden");
   };
-  const schedule = () => {
-    if (queued) return;
-    queued = true;
-    requestAnimationFrame(sync);
-    // アプリ切り替え直後などでrAFが発火しない場合の保険(ログ検索インデックスのafterLayoutと同じ考え方)
-    setTimeout(() => { if (queued) sync(); }, 100);
+
+  const onMove = () => {
+    clearTimeout(settleTimer);
+    if (isKeyboardShown()) {
+      // スクロール中は位置を動かさずに隠し、止まってから置き直す
+      chrome.classList.add("is-scroll-hidden");
+      settleTimer = setTimeout(place, SETTLE_MS);
+    } else if (chrome.style.transform || chrome.classList.contains("is-scroll-hidden")) {
+      place();
+    }
   };
-  vv.addEventListener("scroll", schedule);
-  vv.addEventListener("resize", schedule);
-  window.addEventListener("scroll", schedule, { passive: true });
+
+  vv.addEventListener("scroll", onMove);
+  vv.addEventListener("resize", onMove);
+  window.addEventListener("scroll", onMove, { passive: true });
+  // キーボードの開閉に合わせて置き直す(開閉のアニメーションが落ち着くのを待つ)
+  document.addEventListener("focusin", onMove);
+  document.addEventListener("focusout", () => {
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(place, SETTLE_MS);
+  });
 })();
 
 /* ============================================================

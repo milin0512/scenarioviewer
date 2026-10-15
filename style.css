@@ -94,6 +94,15 @@ body {
   top: 0;
   z-index: 20;
   box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+  transition: opacity 0.15s ease-out;
+}
+
+/* キーボード表示中のスクロールの間だけリボンを隠す(app.js、2026-10-16、ちらつき対策)。
+   隠すときは即座に(ずれた位置で見えないように)、再表示はふわっと出す。 */
+.app-chrome.is-scroll-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transition: none;
 }
 
 .app-header {
