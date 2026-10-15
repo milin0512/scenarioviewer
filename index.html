@@ -109,6 +109,8 @@
     <label class="btn btn--primary btn--block" for="file-input">ファイルを選ぶ</label>
     <input type="file" id="file-input" accept=".pdf,.txt,.html,application/pdf,text/plain,text/html" multiple hidden />
     <p class="load-status" id="load-status">まだファイルが読み込まれていません。</p>
+    <!-- メニューの「別のファイルに入れ替える」でこの画面に戻ったときだけ表示する(2026-10-16) -->
+    <button type="button" class="btn btn--secondary btn--block load-cancel" id="btn-load-cancel" hidden>キャンセル(編集中のシナリオに戻る)</button>
     <!-- 取扱説明書(2026-09-29、Mikoto要望)。メニュー最下部にも同じリンクがある -->
     <a class="btn btn--secondary btn--block manual-link" href="manual.html" target="_blank" rel="noopener">📖 取扱説明書を開く</a>
 
@@ -155,6 +157,6 @@
 <div class="toast" id="toast" hidden></div>
 
 <script src="vendor/pdfjs/pdf.min.js"></script>
-<script src="app.js?v=34"></script>
+<script src="app.js?v=35"></script>
 </body>
 </html>

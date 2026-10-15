@@ -40,6 +40,7 @@ const el = {
   sectionLoad: document.getElementById("section-load"),
   fileInput: document.getElementById("file-input"),
   loadStatus: document.getElementById("load-status"),
+  btnLoadCancel: document.getElementById("btn-load-cancel"),
   resumePanel: document.getElementById("resume-panel"),
   resumeList: document.getElementById("resume-list"),
 
@@ -1168,6 +1169,8 @@ function finishLoad(fileName, kindLabel) {
   state.loaded = true;
   el.loadStatus.textContent = `読み込み済み: ${fileName}(${kindLabel})`;
   el.sectionLoad.hidden = true;
+  el.btnLoadCancel.hidden = true;
+  resumeExcludeKey = null;
   el.modeSwitch.hidden = false;
   el.exportBar.hidden = false;
   el.sidebarOpenBtn.hidden = false;
@@ -1286,15 +1289,7 @@ function renderFileToolsView(container) {
   reloadBtn.type = "button";
   reloadBtn.className = "btn btn--secondary btn--block";
   reloadBtn.textContent = "別のファイルに入れ替える";
-  reloadBtn.addEventListener("click", () => {
-    const ok = window.confirm(
-      "現在の編集内容を破棄して、別のファイルを読み込み直します。よろしいですか?\n" +
-        "(書き出していない見出し・NPC・装飾はすべて失われます)"
-    );
-    if (!ok) return;
-    pendingLoadMode = "replace";
-    el.fileInput.click();
-  });
+  reloadBtn.addEventListener("click", openSwitchScreen);
   container.appendChild(reloadBtn);
 
   // 取扱説明書(manual.html)はメニューの最下部から別タブで開く(2026-09-29、Mikoto要望。CClogと同じ形式)
@@ -1306,6 +1301,58 @@ function renderFileToolsView(container) {
   manualLink.textContent = "📖 取扱説明書を開く";
   container.appendChild(manualLink);
 }
+
+// 「別のファイルに入れ替える」(2026-10-16、Mikoto要望): 新しいファイルを開くだけでなく、
+// 自動保存の履歴(前回の続き、5.17)からも選べるよう、読み込み画面に戻す(CClogの
+// 「別のファイルを読み込む」と同じ方式)。入れ替える前に今のシナリオを自動保存して履歴に
+// 残すため、破棄の確認ダイアログは出さない(Mikoto選択)。自動保存できない環境
+// (プライベートブラウズ等)のときだけ、従来どおり破棄の確認を出す。
+let switchReturnScrollY = 0;
+
+async function openSwitchScreen() {
+  closeSidebar();
+  clearTimeout(autosaveTimer);
+  const saved = await runAutosave();
+  if (!saved) {
+    const ok = window.confirm(
+      "この環境では自動保存が使えないため、現在の編集内容は履歴に残りません。破棄して別のファイルに入れ替えますか?\n" +
+        "(書き出していない見出し・NPC・装飾はすべて失われます)"
+    );
+    if (!ok) return;
+  }
+  switchReturnScrollY = window.scrollY;
+  if (!el.findBar.hidden) setFindBarOpen(false);
+  el.sectionEditor.hidden = true;
+  el.sectionPreview.hidden = true;
+  el.miniToolbar.hidden = true;
+  el.modeSwitch.hidden = true;
+  el.exportBar.hidden = true;
+  el.sidebarOpenBtn.hidden = true;
+  el.sectionLoad.hidden = false;
+  el.btnLoadCancel.hidden = false;
+  el.loadStatus.textContent = saved
+    ? `編集中の「${state.meta.sourceFileName}」は自動保存しました。あとから「前回の続き」で開き直せます。`
+    : `編集中: ${state.meta.sourceFileName}`;
+  // 入れ替え先の候補なので、いま開いているシナリオは一覧から外す(Mikoto選択)
+  resumeExcludeKey = state.meta.sourceFileName || "シナリオ";
+  await renderResumePanel();
+  window.scrollTo(0, 0);
+}
+
+// 何も選ばずに、編集中のシナリオへ戻る
+function closeSwitchScreen() {
+  el.sectionLoad.hidden = true;
+  el.btnLoadCancel.hidden = true;
+  el.modeSwitch.hidden = false;
+  el.exportBar.hidden = false;
+  el.sidebarOpenBtn.hidden = false;
+  el.loadStatus.textContent = `読み込み済み: ${state.meta.sourceFileName}`;
+  resumeExcludeKey = null;
+  setMode(state.mode);
+  window.scrollTo(0, switchReturnScrollY);
+}
+
+el.btnLoadCancel.addEventListener("click", closeSwitchScreen);
 
 function buildSidebarSection(title, renderFn) {
   const section = document.createElement("div");
@@ -4984,8 +5031,9 @@ function scheduleAutosave() {
   autosaveTimer = setTimeout(runAutosave, AUTOSAVE_DELAY_MS);
 }
 
+// 保存できたかを返す(ファイルの入れ替え前に、確実に保存できたかを確かめるため)
 async function runAutosave() {
-  if (!state.loaded) return;
+  if (!state.loaded) return false;
   const key = state.meta.sourceFileName || "シナリオ";
   const entry = {
     key,
@@ -4998,8 +5046,10 @@ async function runAutosave() {
   try {
     await withStore(STORE_AUTOSAVES, "readwrite", (s) => s.put(entry, key));
     await pruneAutosaves();
+    return true;
   } catch (err) {
     /* 保存できなくても編集は続けられるので、通知はしない */
+    return false;
   }
 }
 
@@ -5030,8 +5080,12 @@ function relativeTimeLabel(iso) {
   return `${Math.floor(hours / 24)}日前`;
 }
 
+// 「別のファイルに入れ替える」で読み込み画面に戻ったときは、いま開いているシナリオを
+// 一覧から外す(2026-10-16)。最初の読み込み画面ではnullのまま。
+let resumeExcludeKey = null;
+
 async function renderResumePanel() {
-  const list = await listAutosaves();
+  const list = (await listAutosaves()).filter((entry) => entry.key !== resumeExcludeKey);
   el.resumeList.textContent = "";
   if (list.length === 0) {
     el.resumePanel.hidden = true;
