@@ -1572,14 +1572,29 @@ el.btnSplitCopy.addEventListener("click", () => {
  * (キーボードを出していないときも同じ症状が出ていた)。そこで、(1)キーボードを
  * 出していない間は補正せずstickyだけに任せ、(2)キーボードを出している間は
  * スクロール中のリボンを隠し、止まってから正しい位置に置き直して再表示する(Mikoto選択)。
+ *
+ * 再表示直後のちかちか対策(2026-10-16、Mikoto報告・iPhone実機、キーボード表示中):
+ * 止まったと判断して再表示した直後にも、慣性スクロールの最後のわずかな動きや、位置の
+ * 変わらないscroll/resizeイベントが届き、そのたびに隠し直していたため「現れる→消える→
+ * 現れる」になっていた(推測)。(1)実際に位置・高さが変わっていないイベントは無視する、
+ * (2)止まったと判断するまでの待ち時間を延ばす、(3)再表示直後のしばらくの間は、小さな
+ * 動きなら隠さずにそのまま位置だけ合わせる(大きく動いたときだけ隠す)、の3点で抑える。
  * ========================================================== */
 
 (() => {
   const vv = window.visualViewport;
   const chrome = document.getElementById("app-chrome");
   if (!vv || !chrome) return;
-  const SETTLE_MS = 150;
+  const SETTLE_MS = 250;      // これだけ動きがなければ止まったとみなす
+  const GRACE_MS = 500;       // 再表示してからこの間は、小さな動きでは隠さない
+  const BIG_MOVE_PX = 24;     // 1回のイベントでこれ以上動いたら「新しいスクロール」とみなす
   let settleTimer = null;
+  let shownAt = 0;
+  let prev = null;
+
+  // 見えている領域の位置・高さ。前回のイベントと比べて実際に動いたかを判定する
+  const snap = () => ({ top: vv.pageTop, off: vv.offsetTop, h: vv.height });
+  const movedBy = (a, b) => (a && b ? Math.max(Math.abs(a.top - b.top), Math.abs(a.off - b.off), Math.abs(a.h - b.h)) : Infinity);
 
   // ソフトウェアキーボードを出しているか。入力欄・本文にフォーカスがあり、かつ見えている
   // 領域が縦に縮んでいる(またはずれている)ときだけtrue。iPadの外付けキーボードのように
@@ -1591,20 +1606,40 @@ el.btnSplitCopy.addEventListener("click", () => {
     return vv.offsetTop > 0 || window.innerHeight - vv.height > 80;
   };
 
-  const place = () => {
+  const applyOffset = () => {
     const offset = isKeyboardShown() ? Math.max(0, Math.round(vv.offsetTop)) : 0;
     chrome.style.transform = offset > 0 ? `translateY(${offset}px)` : "";
-    chrome.classList.remove("is-scroll-hidden");
+  };
+
+  const place = () => {
+    applyOffset();
+    if (chrome.classList.contains("is-scroll-hidden")) {
+      chrome.classList.remove("is-scroll-hidden");
+      shownAt = Date.now();
+    }
+    prev = snap();
   };
 
   const onMove = () => {
-    clearTimeout(settleTimer);
     if (isKeyboardShown()) {
-      // スクロール中は位置を動かさずに隠し、止まってから置き直す
-      chrome.classList.add("is-scroll-hidden");
+      const now = snap();
+      const delta = movedBy(now, prev);
+      prev = now;
+      if (delta < 1) return; // 位置も高さも変わっていないイベントは無視する
+      clearTimeout(settleTimer);
+      const hidden = chrome.classList.contains("is-scroll-hidden");
+      if (!hidden && Date.now() - shownAt < GRACE_MS && delta < BIG_MOVE_PX) {
+        // 再表示直後の慣性の名残などの小さな動き: 隠さずに位置だけ合わせる
+        applyOffset();
+      } else {
+        // スクロール中は位置を動かさずに隠し、止まってから置き直す
+        chrome.classList.add("is-scroll-hidden");
+      }
       settleTimer = setTimeout(place, SETTLE_MS);
-    } else if (chrome.style.transform || chrome.classList.contains("is-scroll-hidden")) {
-      place();
+    } else {
+      clearTimeout(settleTimer);
+      prev = null;
+      if (chrome.style.transform || chrome.classList.contains("is-scroll-hidden")) place();
     }
   };
 
