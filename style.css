@@ -342,7 +342,25 @@ a.btn { text-decoration: none; }
   user-select: text;
 }
 
-.editor-body p { margin: 0 0 0.9em; }
+/* 段落の間の余白は、段落の外側(margin)ではなく段落自身の上下(padding)に半分ずつ持たせる
+   (2026-11-20、Mikoto報告: 文末をタップしたのに次の文頭にカーソルが飛ぶ。段落の1行目と
+   途中の行とで、タップを受け付ける行の太さが見えないまま違っている)。
+   marginはどの段落にも属さない隙間なので、そこをタップするとブラウザが次の段落の1行目に
+   寄せてカーソルを置き、1行目だけが上の余白の分だけ太くなっていた(推測。iPhone実機では
+   未確認)。paddingなら隙間の上半分は前の段落の末尾、下半分は次の段落の先頭に属するため、
+   タップは近いほうの行に寄る。見た目の間隔(0.9em)は変わらない。 */
+.editor-body p { margin: 0; padding: 0.45em 0; }
+.editor-body > p:first-child { padding-top: 0; }
+.editor-body > p:last-child { padding-bottom: 0; }
+/* 複数段落にまたがるコピー範囲は、継ぎ目の段落の下マージンを0にした印(app.jsの
+   syncCopyWrapChain。インラインstyleの margin-bottom: 0px)で段落間の隙間を消している。
+   余白をpaddingに移したので、その印のある段落の下と、続く段落の上の余白を消す。 */
+.editor-body p[style*="margin-bottom: 0"] { padding-bottom: 0; }
+.editor-body p[style*="margin-bottom: 0"] + p { padding-top: 0; }
+/* 以前はコピー範囲の上下のマージン(8px)が段落のマージンと重なって吸収されていた。
+   段落の端にあるコピー範囲は、段落の余白だけで間隔をとる(見た目の間隔を変えないため)。 */
+.editor-body p > .cp-wrap:first-child { margin-top: 0; }
+.editor-body p > .cp-wrap:last-child { margin-bottom: 0; }
 
 .h-mark {
   display: inline-block;

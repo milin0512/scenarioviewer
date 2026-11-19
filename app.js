@@ -228,6 +228,50 @@ function stripEditingArtifacts(root) {
   root.normalize();
 }
 
+// 編集中の本文から、iOSなどが差し込んだ編集の痕跡(クラスの無い<span>)を取り除く
+// (2026-11-20、Mikoto報告: 文末をタップしたのに次の文頭にカーソルが飛ぶ、指を動かしても
+// カーソルがなかなか動かない。コピー範囲の近く以外でも起きていた)。
+//
+// 痕跡はこれまで読み込み・復元・書き出しのときにしか取り除いていなかった。そのため、
+// 行をつなぐバックスペースなど、ブラウザ標準の削除に任せている操作のたびに編集中の本文に
+// 溜まり続け、上の説明のとおりタップ位置の解決を狂わせていたと判断した(推測。iPhone実機では
+// 未確認)。タップの最中に本文を書き換えると、それ自体がカーソルのずれの原因になる
+// (2026-08-01の不具合)ため、取り除くのは入力の直後だけにし、カーソルの位置は保つ。
+// 文字ノードの結合(normalize)はカーソルの位置が変わるため、ここでは行わない。
+function stripEditingArtifactsKeepingCaret() {
+  const spans = Array.from(el.editorBody.querySelectorAll("span")).filter((s) => !String(s.className).trim());
+  if (spans.length === 0) return false;
+  const sel = window.getSelection();
+  const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+  let node = range && range.collapsed ? range.startContainer : null;
+  let offset = range ? range.startOffset : 0;
+
+  spans.forEach((span) => {
+    const parent = span.parentNode;
+    if (!parent) return;
+    const idx = Array.prototype.indexOf.call(parent.childNodes, span);
+    // カーソルの位置を、外した<span>の親を基準にした位置へ置き換える
+    if (node === span) {
+      node = parent;
+      offset = idx + offset;
+    } else if (node === parent && offset > idx) {
+      offset += span.childNodes.length - 1;
+    }
+    while (span.firstChild) parent.insertBefore(span.firstChild, span);
+    span.remove();
+  });
+
+  if (node && node.isConnected && el.editorBody.contains(node)) {
+    const max = node.nodeType === 3 ? node.data.length : node.childNodes.length;
+    const caret = document.createRange();
+    caret.setStart(node, Math.min(offset, max));
+    caret.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(caret);
+  }
+  return true;
+}
+
 function normalizeEditorStructure() {
   const body = el.editorBody;
   stripEditingArtifacts(body);
@@ -256,6 +300,19 @@ function normalizeEditorStructure() {
   // 中身が空のコピー範囲は高さが潰れ、見えないのにカーソルを置ける位置になる。
   // <br>で1行分を確保して、通常の空行と同じ扱いにする(2026-08-01、実機HTMLで4件確認)。
   body.querySelectorAll(".cp-target").forEach(ensureCopyTargetHeight);
+
+  // 文章のある段落の末尾に1つだけ残った<br>を取り除く(2026-11-20、Mikotoの書き出しHTMLで
+  // 2件確認)。見た目には何も無いが、その位置にカーソルを置けるため、文末をタップすると
+  // 改行の後ろ(見た目では次の行の先頭)にカーソルが出ることがある(推測)。<br>が2つ続く
+  // 場合は、最後の空行として表示されている(Enterで作った改行)ので残す。
+  Array.from(body.children).forEach((p) => {
+    const last = p.lastChild;
+    if (!last || last.nodeName !== "BR") return;
+    const prev = last.previousSibling;
+    if (!prev || prev.nodeName === "BR") return;
+    if ((p.textContent || "").trim() === "") return;
+    last.remove();
+  });
 
   // 見出しと同じ段落に別の内容が入り込んでいたら切り離す(以前の版で作られた文書への対処)
   isolateAllHeadings();
@@ -2038,7 +2095,7 @@ let savedRange = null;
 const ribbonActionBtns = Array.from(el.miniToolbar.querySelectorAll("button[data-action]"));
 
 document.addEventListener("selectionchange", () => {
-  moveCaretOffCopyButtonLine();
+  scheduleCaretSettleCheck();
   captureCurrentSelectionIfAny();
   updateRibbonActionButtons();
   updateSplitCopyButton();
@@ -2221,10 +2278,12 @@ el.editorBody.addEventListener("input", (e) => {
   // 日本語入力の変換中にDOMを作り替えると変換が壊れるため、確定するまで待つ。
   if (e.isComposing) return;
   clearSearchHighlightsAfterEdit();
+  stripEditingArtifactsKeepingCaret();
   repairCopyRanges();
 });
 el.editorBody.addEventListener("compositionend", () => {
   clearSearchHighlightsAfterEdit();
+  stripEditingArtifactsKeepingCaret();
   repairCopyRanges();
 });
 
@@ -2245,19 +2304,77 @@ el.miniToolbar.querySelectorAll("button[data-action]").forEach((btn) => {
  * 追跡できないため、操作の起点ごとに明示的にスナップショットを取る方式にした。
  * ========================================================== */
 
-const UNDO_STACK_LIMIT = 20;
-let undoStack = [];
+//
+// 文字入力も履歴に入れる(2026-11-20、Mikoto報告: 元に戻すで戻りすぎることがある)。
+// 以前は段落操作・リボン操作などの起点でだけ記録し、ふつうの文字入力・文字の削除は
+// 記録していなかった。そのため「Enter→文章を入力」のあとに元に戻すと、Enterの直前まで
+// 戻り、入力した文章もまとめて消えていた。文字入力は、ひと続きの入力を1回分として
+// 記録する(区切り: 入力と削除の切り替わり、2秒以上の間、カーソルの移動、他の操作)。
+// あわせて、元に戻したときは記録時点のカーソル位置に戻す。
 
-function pushUndoSnapshot() {
-  // 検索マークは表示用の一時的なものなので、履歴に混入させない(2026-07-27)。
-  clearSearchHighlights();
+const UNDO_STACK_LIMIT = 50;
+let undoStack = [];
+let typingUndoGroup = null;   // 続けて入力中の文字入力の種類("insert"/"delete")。nullなら区切り
+let lastTypingAt = 0;
+let lastEditInputAt = 0;
+const TYPING_GROUP_PAUSE_MS = 2000;
+
+// 履歴に記録する本文のHTML。検索マークは表示用の一時的なものなので混入させない。
+function editorHtmlForUndo() {
+  if (!el.editorBody.querySelector(".search-hit")) return el.editorBody.innerHTML;
+  const clone = el.editorBody.cloneNode(true);
+  clone.querySelectorAll(".search-hit").forEach((m) => m.replaceWith(...m.childNodes));
+  return clone.innerHTML;
+}
+
+function currentCaretOffsetsForUndo() {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return null;
+  return rangeToOffsets(el.editorBody, sel.getRangeAt(0));
+}
+
+function pushUndoEntry() {
   undoStack.push({
-    html: el.editorBody.innerHTML,
+    html: editorHtmlForUndo(),
     npcs: JSON.parse(JSON.stringify(state.npcs)),
+    caret: currentCaretOffsetsForUndo(),
   });
   if (undoStack.length > UNDO_STACK_LIMIT) undoStack.shift();
   updateUndoButton();
 }
+
+function pushUndoSnapshot() {
+  // 検索マークは表示用の一時的なものなので、履歴に混入させない(2026-07-27)。
+  clearSearchHighlights();
+  pushUndoEntry();
+  typingUndoGroup = null; // 段落操作などの後の文字入力は、新しい1回分として記録する
+}
+
+// 文字入力の直前に呼ぶ。ひと続きの入力の最初の1文字のときだけ記録する。
+// 入力の途中なので本文のDOMには触れない(検索マークもcloneした側で外す)。
+function noteTypingForUndo(kind) {
+  const now = Date.now();
+  if (typingUndoGroup !== kind || now - lastTypingAt > TYPING_GROUP_PAUSE_MS) {
+    pushUndoEntry();
+    typingUndoGroup = kind;
+  }
+  lastTypingAt = now;
+}
+
+const TYPING_INPUT_KINDS = {
+  insertText: "insert",
+  insertReplacementText: "insert",
+  insertFromDrop: "insert",
+  deleteContentBackward: "delete",
+  deleteContentForward: "delete",
+  deleteWordBackward: "delete",
+  deleteWordForward: "delete",
+  deleteSoftLineBackward: "delete",
+  deleteSoftLineForward: "delete",
+  deleteHardLineBackward: "delete",
+  deleteHardLineForward: "delete",
+  deleteByCut: "delete",
+};
 
 function updateUndoButton() {
   el.btnUndo.disabled = undoStack.length === 0;
@@ -2273,7 +2390,13 @@ function performUndo() {
   state.npcs = snapshot.npcs;
   searchHits = [];
   searchHitIndex = 0;
-  window.getSelection().removeAllRanges();
+  typingUndoGroup = null;
+  // 記録した時点のカーソル位置に戻す(どこが戻ったか分かるように)。
+  // 位置が取れない場合は以前と同じくカーソルを外す。
+  const caret = snapshot.caret ? offsetsToRange(el.editorBody, snapshot.caret) : null;
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  if (caret && state.mode === "edit") sel.addRange(caret);
   savedRange = null;
   updateRibbonActionButtons();
   updateSplitCopyButton();
@@ -2285,6 +2408,17 @@ function performUndo() {
 }
 
 el.btnUndo.addEventListener("click", performUndo);
+
+// 日本語入力などの変換の始まりも文字入力として記録する(変換中のbeforeinputは取り消せず、
+// 1文字ごとに記録すると細かくなりすぎるため、変換の開始時点で1回だけ判定する)。
+el.editorBody.addEventListener("compositionstart", () => noteTypingForUndo("insert"));
+
+// カーソルを動かしたら、次の文字入力は新しい1回分として記録する。入力そのものに伴う
+// selectionchangeと区別するため、直前の入力から少し時間が空いたものだけを数える。
+document.addEventListener("selectionchange", () => {
+  if (Date.now() - lastEditInputAt > 150) typingUndoGroup = null;
+});
+el.editorBody.addEventListener("input", () => { lastEditInputAt = Date.now(); });
 
 /* ============================================================
  * 見出し・文字装飾・コピペボタン設置の適用(5.4・5.6・5.12)
@@ -2773,21 +2907,66 @@ function placeCaretAtCopyTargetEnd(target) {
   sel.addRange(caret);
 }
 
-// カーソルがボタンの行に入ったら、編集できる位置へ移す。下・右への矢印キーで来たときは
-// 次の段落の先頭へ(素通りできるように)、それ以外(タップ・上への移動など)はコピー範囲の
-// 文章の末尾へ移す。
+// カーソルがボタンの行に入ったら、編集できる位置へ移す。下・右への矢印キーで来たときや、
+// コピー範囲より下をタップ・クリックしたときは次の段落の先頭へ、それ以外(ボタンの横の
+// タップ・上への移動など)はコピー範囲の文章の末尾へ移す。
+//
+// 移すのは、カーソルがボタンの行で止まったときだけにする(2026-11-20、Mikoto報告:
+// 指でタップしたカーソルが狙った場所から離れた位置に出る/指を動かしてもカーソルが
+// なかなか動かない)。当初はカーソルがボタンの行に入った瞬間に移していたため、指で
+// カーソルを引きずっている途中や、iPhoneのスペースキー長押しでカーソルを動かしている
+// 途中にコピー範囲を通ると、そのたびにカーソルを引き戻していた。また、コピー範囲のすぐ
+// 下を狙ったタップがボタンの行と判定されると、コピー範囲の文章の末尾(離れた位置)へ
+// 飛ばしていた(どちらも推測。iPhone実機では未確認)。そこで、指・マウスのボタンが
+// 押されている間は何もせず、カーソルの移動が落ち着いてから(CARET_SETTLE_MS)判定する。
+// ボタンの行で入力しようとしたときは、待たずにすぐ移す(beforeinputのガード参照)。
+const CARET_SETTLE_MS = 350;
 let lastCaretMoveForward = false;
+let pointerIsDown = false;
+let lastPointerY = null;
+let caretSettleTimer = null;
 el.editorBody.addEventListener("keydown", (e) => {
   lastCaretMoveForward = e.key === "ArrowDown" || e.key === "ArrowRight";
+  lastPointerY = null;
 });
-function moveCaretOffCopyButtonLine() {
+el.editorBody.addEventListener("touchstart", () => { pointerIsDown = true; }, { passive: true });
+el.editorBody.addEventListener("mousedown", () => { pointerIsDown = true; });
+const onPointerRelease = (y) => {
+  if (!pointerIsDown) return;
+  pointerIsDown = false;
+  lastPointerY = y;
+  lastCaretMoveForward = false;
+  scheduleCaretSettleCheck();
+};
+document.addEventListener("touchend", (e) => {
+  if (e.touches.length > 0) return;
+  const t = e.changedTouches && e.changedTouches[0];
+  onPointerRelease(t ? t.clientY : null);
+}, { passive: true });
+document.addEventListener("touchcancel", () => onPointerRelease(null), { passive: true });
+document.addEventListener("mouseup", (e) => onPointerRelease(e.clientY));
+
+function scheduleCaretSettleCheck() {
+  clearTimeout(caretSettleTimer);
+  if (pointerIsDown) return;
+  caretSettleTimer = setTimeout(() => moveCaretOffCopyButtonLine(false), CARET_SETTLE_MS);
+}
+
+function moveCaretOffCopyButtonLine(immediate) {
   if (state.mode !== "edit") return;
+  if (!immediate && pointerIsDown) return;
+  clearTimeout(caretSettleTimer);
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return;
   const wrap = caretOnCopyButtonLine(sel.getRangeAt(0));
   if (!wrap) return;
-  const forward = lastCaretMoveForward;
+  let forward = lastCaretMoveForward;
+  if (!forward && lastPointerY !== null) {
+    // コピー範囲(の背景)より下を指した場合は、次の段落を狙ったものとみなす
+    forward = lastPointerY > wrap.getBoundingClientRect().bottom;
+  }
   lastCaretMoveForward = false;
+  lastPointerY = null;
   const block = wrap.parentNode;
   const next = forward && block ? block.nextElementSibling : null;
   if (next) {
@@ -3139,9 +3318,11 @@ el.editorBody.addEventListener("beforeinput", (e) => {
   const range = sel.getRangeAt(0);
   if (!range.collapsed || !el.editorBody.contains(range.startContainer)) return;
 
-  if (caretOnCopyButtonLine(range)) {
+  if (caretOnCopyButtonLine(range) && !e.inputType.startsWith("history")) {
     if (e.cancelable) e.preventDefault();
     e.stopImmediatePropagation();
+    // 次の入力が通るよう、カーソルをすぐに編集できる位置へ移す
+    moveCaretOffCopyButtonLine(true);
     return;
   }
 
@@ -3328,6 +3509,35 @@ el.editorBody.addEventListener("beforeinput", (e) => {
   // コピー範囲の後ろへ続いた内容を段落として切り離す(repairCopyRanges参照)
   repairCopyRanges();
   scheduleAutoRender();
+});
+
+// 文字入力を「元に戻す」の履歴に記録する(2026-11-20、pushUndoSnapshot付近の説明参照)。
+// Enter・段落の結合など自前で処理する入力は、その処理の中で記録済みなので、
+// それらより後に登録し、取り消された(defaultPrevented)入力は記録しない。
+// ブラウザ標準の取り消し(Ctrl+Z、iPadのキーボードの取り消しボタンなど)は、自前で書き換えた
+// DOMを追跡できず「元に戻す」ボタンと結果が食い違うため、ボタンと同じ処理に揃える。
+el.editorBody.addEventListener("beforeinput", (e) => {
+  if (e.inputType === "historyUndo") {
+    e.preventDefault();
+    performUndo();
+    return;
+  }
+  if (e.inputType === "historyRedo") {
+    e.preventDefault(); // やり直しは未対応
+    return;
+  }
+  if (e.defaultPrevented) return;
+  const kind = TYPING_INPUT_KINDS[e.inputType];
+  if (kind) noteTypingForUndo(kind);
+});
+
+// PCのCtrl+Z(MacはCmd+Z)。ブラウザ標準の取り消し履歴が空だとhistoryUndoが届かない
+// ことがあるため、キー操作の時点で「元に戻す」ボタンと同じ処理にする。
+el.editorBody.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && !e.isComposing && !e.shiftKey && !e.altKey && (e.key === "z" || e.key === "Z")) {
+    e.preventDefault();
+    performUndo();
+  }
 });
 
 // 段落を結合するときの受け入れ先を決め、実際にblockの中身をprevへ移す。
@@ -5297,6 +5507,8 @@ function currentBodyHtmlForSave() {
     mark.remove();
     parent.normalize();
   });
+  // needsCleanの判定どおり、編集の痕跡も保存データに持ち込まない
+  stripEditingArtifacts(clone);
   return clone.innerHTML;
 }
 
