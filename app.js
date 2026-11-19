@@ -260,6 +260,10 @@ function normalizeEditorStructure() {
   // 見出しと同じ段落に別の内容が入り込んでいたら切り離す(以前の版で作られた文書への対処)
   isolateAllHeadings();
 
+  // コピー範囲の後ろに同じ段落の文章が続いていたら切り離し、ボタンの行に紛れ込んだ
+  // 文章を戻す(以前の版で作られた文書への対処。repairCopyRanges参照)
+  repairCopyRanges();
+
   // 分割されたテキストノードを結合し、余計な境界をなくす
   body.normalize();
 }
@@ -2034,6 +2038,7 @@ let savedRange = null;
 const ribbonActionBtns = Array.from(el.miniToolbar.querySelectorAll("button[data-action]"));
 
 document.addEventListener("selectionchange", () => {
+  moveCaretOffCopyButtonLine();
   captureCurrentSelectionIfAny();
   updateRibbonActionButtons();
   updateSplitCopyButton();
@@ -2216,8 +2221,12 @@ el.editorBody.addEventListener("input", (e) => {
   // 日本語入力の変換中にDOMを作り替えると変換が壊れるため、確定するまで待つ。
   if (e.isComposing) return;
   clearSearchHighlightsAfterEdit();
+  repairCopyRanges();
 });
-el.editorBody.addEventListener("compositionend", clearSearchHighlightsAfterEdit);
+el.editorBody.addEventListener("compositionend", () => {
+  clearSearchHighlightsAfterEdit();
+  repairCopyRanges();
+});
 
 el.miniToolbar.querySelectorAll("button[data-action]").forEach((btn) => {
   btn.addEventListener("mousedown", (e) => {
@@ -2519,6 +2528,9 @@ function buildCpButton(cpId) {
   btn.className = "cp-btn";
   btn.dataset.cpid = cpId;
   btn.textContent = "📋コピー";
+  // ボタンの文言は編集させない(2026-11-20、Mikoto要望。ボタンの行の扱いは
+  // repairCopyRanges・caretOnCopyButtonLine参照)
+  btn.contentEditable = "false";
   return btn;
 }
 
@@ -2559,6 +2571,7 @@ function applyCopyButtonMark(range) {
     const wrapper = wrapAsCpTarget(range.extractContents(), cpId);
     wrapper.appendChild(buildCpButton(cpId));
     range.insertNode(wrapper);
+    repairCopyRanges();
     return;
   }
 
@@ -2582,6 +2595,7 @@ function applyCopyButtonMark(range) {
     }
     subRange.insertNode(wrapper);
   });
+  repairCopyRanges();
 }
 
 // 同じcpidを持つ.cp-wrapの並びを見直し、見た目とボタン位置を整え直す。
@@ -2616,6 +2630,193 @@ function syncCopyWrapChain(cpId) {
 function ensureCopyTargetHeight(target) {
   if (!target) return;
   if (target.childNodes.length === 0) target.appendChild(document.createElement("br"));
+}
+
+/* ------------------------------------------------------------
+ * コピー範囲の構造を保つ(2026-11-20、Mikoto報告・要望)
+ *
+ * コピー範囲は <p><span.cp-wrap><span.cp-target>文章</span><button.cp-btn/></span></p>
+ * の形で、.cp-wrap・.cp-target はどちらも見た目だけブロックにした<span>。
+ * 段落の途中の行にコピーボタンを設置すると、範囲の後ろの行(<br>以降)が同じ<p>の中に
+ * 残っていた。これが2つの不具合の原因だった。
+ *   1. 範囲の直後に残った<br>が、ブロックの直後で空行として表示される(段落の途中に
+ *      設置したときだけ空行が入る、という食い違い)。
+ *   2. その行の先頭でのバックスペースは「段落の先頭」と判定されず(caretIsAtBlockStart)、
+ *      自前の結合処理(mergeBlocks)ではなくブラウザ既定の削除に任されていた。ブラウザは
+ *      見た目だけブロックの<span>をどう結合するか独自に判断するため、文章がボタンの後ろ
+ *      (ボタンの行の末尾)に入ったり、コピー範囲の途中に入ったりしていた(Chromeで
+ *      前者を再現。後者はiPhone Safariでの報告で、同じ原因と判断した。推測です)。
+ * そこで「コピー範囲は常に段落の末尾で終わる」ことにし、範囲の後ろに文章が続く場合は
+ * そこで段落を分ける(段落の区切りが空行の代わりになる)。後ろが改行・空白だけなら
+ * 取り除く。あわせて、ボタンの行(.cp-target の後ろ)には文字を入れさせない
+ * (caretOnCopyButtonLine・selectionchangeでのカーソル移動・beforeinputでの入力拒否)。
+ * ブラウザの既定処理などで構造が崩れた場合も、入力のたびにここで元の形に直す。
+ * ------------------------------------------------------------ */
+
+// .cp-wrap の中の、.cp-target・ボタン以外のもの(ブラウザが紛れ込ませた文章など)を
+// 正しい位置へ戻す。.cp-target より前のもの→範囲の先頭、ボタンより前→範囲の末尾、
+// ボタンより後ろ→範囲の外(直後。段落の切り離しはisolateCopyRangeEndが行う)。
+function repairCopyWrapInside(wrap) {
+  const target = Array.from(wrap.children).find((c) => c.classList.contains("cp-target"));
+  if (!target) return false;
+  const btn = Array.from(wrap.children).find((c) => c.classList.contains("cp-btn"));
+  if (btn && btn.contentEditable !== "false") btn.contentEditable = "false";
+  let changed = false;
+  let seenTarget = false;
+  let seenBtn = false;
+  const before = document.createDocumentFragment();
+  const outside = document.createDocumentFragment();
+  Array.from(wrap.childNodes).forEach((n) => {
+    if (n === target) { seenTarget = true; return; }
+    if (n === btn) { seenBtn = true; return; }
+    changed = true;
+    if (n.nodeType === 3 && n.data === "") { n.remove(); return; }
+    if (n.nodeType === 1 && n.classList.contains("cp-btn")) { n.remove(); return; } // 重複したボタン
+    if (!seenTarget) before.appendChild(n);
+    else if (!seenBtn) target.appendChild(n);
+    else outside.appendChild(n);
+  });
+  if (before.firstChild) target.insertBefore(before, target.firstChild);
+  if (outside.firstChild && wrap.parentNode) wrap.parentNode.insertBefore(outside, wrap.nextSibling);
+  return changed;
+}
+
+// コピー範囲(.cp-wrap)の後ろに同じ段落の内容が続いていれば、そこで段落を分ける。
+// 改行・空白だけなら取り除く(これが「範囲の直後の空行」の正体だったため)。
+function isolateCopyRangeEnd(wrap) {
+  const block = wrap.parentNode;
+  if (!block || block.parentNode !== el.editorBody) return false;
+  const after = [];
+  for (let n = wrap.nextSibling; n; n = n.nextSibling) after.push(n);
+  if (after.length === 0) return false;
+  const meaningful = (n) => !(n.nodeType === 3 && n.data.trim() === "") && n.nodeName !== "BR";
+  if (!after.some(meaningful)) {
+    after.forEach((n) => n.remove());
+    return true;
+  }
+  const p = document.createElement(block.tagName === "DIV" ? "div" : "p");
+  p.style.marginLeft = block.style.marginLeft;
+  after.forEach((n) => p.appendChild(n));
+  while (p.firstChild && !meaningful(p.firstChild)) p.firstChild.remove();
+  block.parentNode.insertBefore(p, block.nextSibling);
+  p.querySelectorAll(".cp-wrap").forEach((w) => { if (w.dataset.cpid) syncCopyWrapChain(w.dataset.cpid); });
+  return true;
+}
+
+// 本文中のすべてのコピー範囲の構造を整える。変更があった場合は、カーソル位置を保つ。
+function repairCopyRanges() {
+  const wraps = Array.from(el.editorBody.querySelectorAll(".cp-wrap"));
+  if (wraps.length === 0) return false;
+  const sel = window.getSelection();
+  const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+  const caretNode = range && range.collapsed ? range.startContainer : null;
+  const caretOffset = range ? range.startOffset : 0;
+
+  let changed = false;
+  const cpIds = new Set();
+  wraps.forEach((w) => {
+    if (!w.isConnected) return;
+    if (w.dataset.cpid) cpIds.add(w.dataset.cpid);
+    if (repairCopyWrapInside(w)) changed = true;
+  });
+  wraps.forEach((w) => { if (w.isConnected && isolateCopyRangeEnd(w)) changed = true; });
+  if (!changed) return false;
+  cpIds.forEach((id) => syncCopyWrapChain(id));
+  el.editorBody.querySelectorAll(".cp-target").forEach(ensureCopyTargetHeight);
+
+  // 文字ノードの中にあったカーソルは、ノードごと動かすと外れてしまうので置き直す
+  if (caretNode && caretNode.isConnected && el.editorBody.contains(caretNode)) {
+    const max = caretNode.nodeType === 3 ? caretNode.data.length : caretNode.childNodes.length;
+    const caret = document.createRange();
+    caret.setStart(caretNode, Math.min(caretOffset, max));
+    caret.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(caret);
+  }
+  return true;
+}
+
+// カーソルが「ボタンの行」(.cp-target より後ろ、またはコピー範囲の直後)にあれば、
+// そのコピー範囲(.cp-wrap)を返す。
+function caretOnCopyButtonLine(range) {
+  if (!range) return null;
+  const node = range.startContainer;
+  if (!el.editorBody.contains(node)) return null;
+  const wrap = findAncestorMark(node, (n) => n.classList && n.classList.contains("cp-wrap"));
+  if (wrap) {
+    const target = wrap.querySelector(".cp-target");
+    if (!target) return null;
+    if (target === node || target.contains(node)) return null;
+    // .cp-target より前(範囲の先頭)はボタンの行ではない
+    const startOfTarget = document.createRange();
+    startOfTarget.setStartBefore(target);
+    if (range.compareBoundaryPoints(Range.START_TO_START, startOfTarget) <= 0) return null;
+    return wrap;
+  }
+  // 段落の中で、コピー範囲の直後(=段落の末尾。isolateCopyRangeEndにより後ろには何も無い)
+  if (node.nodeType === 1 && node.parentNode === el.editorBody) {
+    const prev = node.childNodes[range.startOffset - 1];
+    if (prev && prev.classList && prev.classList.contains("cp-wrap")) return prev;
+  }
+  return null;
+}
+
+// コピー範囲の文章の末尾(範囲を終える<br>があればその手前)にカーソルを置く。
+function placeCaretAtCopyTargetEnd(target) {
+  const sel = window.getSelection();
+  const caret = document.createRange();
+  const last = target.lastChild;
+  if (last && last.nodeName === "BR") caret.setStartBefore(last);
+  else caret.setStart(target, target.childNodes.length);
+  caret.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(caret);
+}
+
+// カーソルがボタンの行に入ったら、編集できる位置へ移す。下・右への矢印キーで来たときは
+// 次の段落の先頭へ(素通りできるように)、それ以外(タップ・上への移動など)はコピー範囲の
+// 文章の末尾へ移す。
+let lastCaretMoveForward = false;
+el.editorBody.addEventListener("keydown", (e) => {
+  lastCaretMoveForward = e.key === "ArrowDown" || e.key === "ArrowRight";
+});
+function moveCaretOffCopyButtonLine() {
+  if (state.mode !== "edit") return;
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return;
+  const wrap = caretOnCopyButtonLine(sel.getRangeAt(0));
+  if (!wrap) return;
+  const forward = lastCaretMoveForward;
+  lastCaretMoveForward = false;
+  const block = wrap.parentNode;
+  const next = forward && block ? block.nextElementSibling : null;
+  if (next) {
+    const nextTarget = next.querySelector(".cp-target");
+    const caret = document.createRange();
+    if (nextTarget && next.firstElementChild === nextTarget.parentNode) caret.setStart(nextTarget, 0);
+    else caret.setStart(next, 0);
+    caret.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(caret);
+    return;
+  }
+  const target = wrap.querySelector(".cp-target");
+  if (target) placeCaretAtCopyTargetEnd(target);
+}
+
+// カーソルから .cp-target の終わりまでに、文字も<br>も無いか。
+function caretIsAtCopyTargetEnd(range, target) {
+  const after = document.createRange();
+  try {
+    after.setStart(range.startContainer, range.startOffset);
+    after.setEnd(target, target.childNodes.length);
+  } catch (err) {
+    return false;
+  }
+  if (rangeTextForPosition(after) !== "") return false;
+  const holder = document.createElement("div");
+  holder.appendChild(after.cloneContents());
+  return !holder.querySelector("br");
 }
 
 // コピー範囲の中でEnterを押したときに、通常の本文と同じく「1回で段落が変わる」
@@ -2928,6 +3129,41 @@ function insertParagraphAfterHeading(hmark) {
   sel.addRange(caret);
 }
 
+// コピーボタンの行は編集させない(2026-11-20、Mikoto要望。repairCopyRanges参照)。
+// 以下のEnter・バックスペースの処理より先に登録し、ボタンの行での入力はここで止める。
+// コピー範囲の末尾での前方削除(Delete)は、ブラウザ既定だとボタンを消してしまうため、
+// 次の段落の先頭でのバックスペースと同じく、次の段落をコピー範囲の末尾へつなぐ。
+el.editorBody.addEventListener("beforeinput", (e) => {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
+  const range = sel.getRangeAt(0);
+  if (!range.collapsed || !el.editorBody.contains(range.startContainer)) return;
+
+  if (caretOnCopyButtonLine(range)) {
+    if (e.cancelable) e.preventDefault();
+    e.stopImmediatePropagation();
+    return;
+  }
+
+  if (e.inputType === "deleteContentForward") {
+    const target = findAncestorMark(range.startContainer, (n) => n.classList && n.classList.contains("cp-target"));
+    if (!target || !caretIsAtCopyTargetEnd(range, target)) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    const block = closestBlock(target);
+    const next = block && block !== el.editorBody ? block.nextElementSibling : null;
+    if (!next || (next.tagName !== "P" && next.tagName !== "DIV") || next.querySelector(".h-mark")) return;
+    // 次の段落が別のコピー範囲を含むときは、つなげても段落が切り離し直されるだけなので何もしない
+    const nextWrap = next.querySelector(".cp-wrap");
+    const wrap = target.parentNode;
+    if (nextWrap && !(next.firstElementChild === nextWrap && nextWrap.dataset.cpid === wrap.dataset.cpid)) return;
+    pushUndoSnapshot();
+    mergeBlocks(block, next);
+    repairCopyRanges();
+    scheduleAutoRender();
+  }
+});
+
 el.editorBody.addEventListener("beforeinput", (e) => {
   if (e.inputType !== "insertParagraph") return;
   const sel = window.getSelection();
@@ -3088,6 +3324,9 @@ el.editorBody.addEventListener("beforeinput", (e) => {
   if (prev.querySelector(".h-mark") && block.querySelector(".h-mark, .cp-wrap")) return;
   pushUndoSnapshot();
   mergeBlocks(prev, block);
+  // コピー範囲で終わる段落に、コピー範囲を含む段落をつないだ場合などに、
+  // コピー範囲の後ろへ続いた内容を段落として切り離す(repairCopyRanges参照)
+  repairCopyRanges();
   scheduleAutoRender();
 });
 
@@ -4376,6 +4615,7 @@ function buildStandaloneHtml() {
   bodyClone.querySelectorAll(".cp-btn").forEach((btn) => {
     const spans = bodyClone.querySelectorAll(`.cp-target[data-cpid="${btn.dataset.cpid}"]`);
     btn.setAttribute("data-copy-text", copyRangeText(spans));
+    btn.removeAttribute("contenteditable"); // 編集画面用の指定は書き出しに持ち込まない
   });
 
   const toggleTree = buildToggleTree(bodyClone);
