@@ -2,6 +2,10 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8" />
+<!-- 多層防御のためのCSP(2026-11-20のセキュリティ点検)。読み込むファイルは洗浄しているが、
+     万一本文にイベントハンドラ属性(on*)やscriptが紛れ込んでも実行させず、外部への通信も禁止する。
+     styleは本文の字下げ等でstyle属性を使うため'unsafe-inline'を許可している。 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
 <title>シナリオ整形ツール</title>
 <link rel="icon" href="icon.png?v=2" />
@@ -156,7 +160,9 @@
 <!-- コピー成否のトースト通知 -->
 <div class="toast" id="toast" hidden></div>
 
-<script src="vendor/pdfjs/pdf.min.js"></script>
-<script src="app.js?v=35"></script>
+<!-- pdf.js 6.5.438(旧ブラウザ向けのlegacyビルド)。4.0以降はモジュール形式でしか配布されないため
+     type="module"で読み込む。読み込むとglobalThis.pdfjsLibが定義される(2026-11-20更新) -->
+<script type="module" src="vendor/pdfjs/pdf.min.mjs?v=6.5.438"></script>
+<script src="app.js?v=37"></script>
 </body>
 </html>

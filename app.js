@@ -397,25 +397,22 @@ function decodeTextFile(arrayBuffer) {
  *     → 通常の漢字に置き換える。
  * ========================================================== */
 
-// pdf.min.js はクラシックスクリプト(UMDビルド)として読み込んでおり、
-// window.pdfjsLib がグローバルに使える(動的importを使わないのは、
-// file://で直接開いた場合にモジュール解決が失敗するため)。
-if (window.pdfjsLib) {
-  window.pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdfjs/pdf.worker.min.js";
-}
+// pdf.js は index.html から type="module" で読み込んでおり(6.5.438 legacyビルド、2026-11-20更新)、
+// 読み込み後は globalThis.pdfjsLib が使える。モジュールはこのapp.jsより後に実行されるため、
+// workerSrcの設定はPDFを開く時点で行う。
+// 旧版(3.11.174)はCVE-2024-4367の対象で、回避策としてisEvalSupported:falseを指定していたが、
+// 6.5.438は修正済みでこのオプション自体が廃止されたため指定しない。CVE-2026-16633(5.6.83〜6.2.108)
+// も修正済みの版である。
+const PDFJS_WORKER_SRC = "vendor/pdfjs/pdf.worker.min.mjs?v=6.5.438";
 
 async function extractPdfText(file) {
   el.loadStatus.textContent = `PDF「${file.name}」を解析しています…`;
   if (!window.pdfjsLib) throw new Error("pdf.jsの読み込みに失敗しています。");
   const pdfjsLib = window.pdfjsLib;
+  pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_SRC;
   const arrayBuffer = await file.arrayBuffer();
-  // isEvalSupported:false は CVE-2024-4367(pdf.js 4.2.67未満で、細工したPDFのFontMatrix
-  // 経由で任意のJavaScriptが実行される問題)に対する公式の回避策。同梱しているpdf.jsは
-  // 3.11.174で影響範囲に入るため明示的に無効化する(2026-07-27のセキュリティ点検)。
-  // 本ツールはテキスト抽出しか行わず描画しないため、無効化による実害はない。
   const pdf = await pdfjsLib.getDocument({
     data: arrayBuffer,
-    isEvalSupported: false,
   }).promise;
 
   // 繰り返し要素(目次・柱)の判定に全ページを見比べる必要があるため、
@@ -515,13 +512,17 @@ function buildPdfPageSegments(textContent, pageWidth, pageHeight) {
   const page = { width: pageWidth, height: pageHeight, segments: [], bodySize: 10 };
   let items = textContent.items
     .filter((it) => typeof it.str === "string" && it.str.trim() !== "")
-    .map((it) => ({
-      x: it.transform[4],
-      y: it.transform[5],
-      w: Math.max(it.width || 0, 0),
-      size: Math.abs(it.transform[3]) || Math.abs(it.transform[0]) || 1,
-      str: normalizePdfChars(it.str),
-    }));
+    .map((it) => {
+      const w = Math.max(it.width || 0, 0);
+      const str = normalizePdfChars(it.str);
+      return {
+        x: it.transform[4],
+        y: it.transform[5],
+        w,
+        size: pdfItemSize(Math.abs(it.transform[3]) || Math.abs(it.transform[0]) || 1, w, str),
+        str,
+      };
+    });
   if (items.length === 0) return page;
 
   // 同じ位置に同じ文字列が重なっている断片(袋文字・影付き文字などの装飾)は1つにする。
@@ -590,6 +591,23 @@ function buildPdfPageSegments(textContent, pageWidth, pageHeight) {
   });
   page.segments = page.segments.filter((seg) => seg.text !== "");
   return page;
+}
+
+// 断片の文字サイズ。pdf.js 4以降(2026-11-20に3.11.174→6.5.438へ更新)は、同じ行の中で
+// 文字サイズが変わる部分(本文中の小さい括弧書きなど)も1つの断片にまとめ、先頭の文字の
+// サイズだけを返すようになった。そのため「（ウクソル・コー/ポレーション）に属しています…」の
+// ように小さい文字で始まる行が丸ごと小さい文字の行と判定され、前の行とつながらなくなった
+// (エンデビで確認)。断片の幅を文字数で割った平均の文字幅のほうが少し大きい場合は、そちらを
+// 実際の文字サイズとみなす。字間を大きく空けた見出しまで拡大しないよう、1.4倍までに限る。
+// 英数字・半角カナは字によって幅が違い平均がサイズの目安にならない(混ぜて試したところ
+// 他の9本で改行位置が大きく崩れた)ため、全角文字だけでできた断片に限って推定する。
+function pdfItemSize(transformSize, width, str) {
+  const chars = Array.from(str);
+  if (chars.length < 6 || width <= 0) return transformSize;
+  if (chars.some((c) => /[\x00-\x7E｡-ﾟ]/.test(c))) return transformSize;
+  const est = width / chars.length;
+  if (est > transformSize * 1.08 && est <= transformSize * 1.4) return est;
+  return transformSize;
 }
 
 // 同じページの複数の行で、ほぼ同じ横位置に入っている「日本語と日本語の間の半角スペース」を
@@ -1156,13 +1174,31 @@ function sanitizeLoadedBodyHtml(htmlString) {
 
 // NPCカードのデータは表示時にテキストとして扱われるため中身の文字列は問題ないが、
 // idだけはセレクタ・属性値に埋め込まれるため正規化する。
+// 2026-11-20の点検で、細工したファイルの値の型(配列であるべき所に文字列・オブジェクト等)に
+// よって描画処理が例外で止まること、Object.assignで"__proto__"キーまでコピーされることを
+// 確認したため、本ツールが使うフィールドだけを決まった型で組み立て直す方式に変更した。
 function sanitizeLoadedNpcs(npcs) {
   if (!Array.isArray(npcs)) return [];
-  return npcs.map((npc) => {
-    const safe = Object.assign({}, npc);
-    safe.id = safeIdValue(npc && npc.id, "npc");
-    return safe;
-  });
+  const str = (v) => (typeof v === "string" ? v : typeof v === "number" ? String(v) : "");
+  const rows = (list, keys) =>
+    (Array.isArray(list) ? list : [])
+      .filter((r) => r && typeof r === "object")
+      .map((r) => {
+        const out = {};
+        keys.forEach((k) => { out[k] = str(r[k]); });
+        return out;
+      });
+  return npcs
+    .filter((npc) => npc && typeof npc === "object")
+    .map((npc) => ({
+      id: safeIdValue(npc.id, "npc"),
+      name: str(npc.name),
+      profile: str(npc.profile),
+      commandPrefix: npc.commandPrefix === "CC" ? "CC" : "CCB",
+      params: rows(npc.params, ["label", "value"]),
+      status: rows(npc.status, ["label", "value", "max"]),
+      skills: rows(npc.skills, ["command", "label"]),
+    }));
 }
 
 function finishLoad(fileName, kindLabel) {
