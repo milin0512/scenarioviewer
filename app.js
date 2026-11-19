@@ -1974,15 +1974,20 @@ function rangeToOffsets(root, range) {
   return { start, end: probe.toString().length };
 }
 
+// 範囲選択(start≠end)の開始位置が段落の境目ちょうどのときは、前の段落の末尾ではなく
+// 次の段落の先頭に置く(2026-11-20、Mikoto報告: コピーボタン設置→元に戻す→見出し化で、
+// 戻った選択範囲の開始点が前の段落の末尾になり、空の見出しができていた)。
+// カーソルだけ(start=end)のときは、従来どおり前のテキストの末尾に置く。
 function offsetsToRange(root, off) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const range = document.createRange();
+  const startAtNextNode = off.end > off.start;
   let pos = 0;
   let startDone = false;
   let node;
   while ((node = walker.nextNode())) {
     const len = node.data.length;
-    if (!startDone && pos + len >= off.start) {
+    if (!startDone && (startAtNextNode ? pos + len > off.start : pos + len >= off.start)) {
       range.setStart(node, off.start - pos);
       startDone = true;
     }
