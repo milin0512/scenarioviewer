@@ -404,7 +404,8 @@ function structureToPlainText(root) {
 function plainTextToStructureHtml(text) {
   // ファイル末尾の改行がそのまま余計な<br>になり、最終行がいきなり「空行の上」の
   // 扱いになってしまうため、前後の改行は落としてから分割する。
-  const normalized = String(text).replace(/\r\n|\r/g, "\n").replace(/^\n+|\n+$/g, "");
+  // 1文字下げの行も段落の始まりとして扱う(indentedLinesToParagraphs参照)
+  const normalized = indentedLinesToParagraphs(text).replace(/^\n+|\n+$/g, "");
   return normalized
     .split(/\n{2,}/)
     .map((block) => {
@@ -414,6 +415,27 @@ function plainTextToStructureHtml(text) {
       return "<p>" + block.split("\n").map(escapeHtml).join("<br>") + "</p>";
     })
     .join("\n");
+}
+
+// 読み込んだTXT・PDFの「1文字下げで始まる行」を段落の始まりとして扱う(2026-11-25、
+// Mikoto要望)。シナリオのTXTは段落を空行ではなく行頭の字下げ(全角スペース)で表す
+// ものが多く、「改行1つ=詰まった改行」の規則(5.20)のままでは段落として認識されなかった。
+// Mikoto選択により、字下げの空白は取り除き(段落の余白が代わりになる)、字下げの行が
+// 続く場合も1行ずつ段落にする。空白だけの行も空行として扱う。
+// 5.20の「全経路で共通の規則」に従い、読み込みだけでなく貼り付けにも適用する
+// (plainTextToStructureHtmlの中で通す。Mikoto指示により例外にしない)。そのため、ツール内で
+// コピーした本文に行頭の空白で始まる行があると、貼り直したときにその行は段落になる。
+function indentedLinesToParagraphs(text) {
+  const lines = String(text).replace(/\r\n|\r/g, "\n").split("\n");
+  const out = [];
+  lines.forEach((line) => {
+    if (/^[ \t　]*$/.test(line)) { out.push(""); return; }
+    const indent = line.match(/^[ \t　]+/);
+    if (!indent) { out.push(line); return; }
+    if (out.length > 0 && out[out.length - 1] !== "") out.push("");
+    out.push(line.slice(indent[0].length));
+  });
+  return out.join("\n");
 }
 
 // UTF-8として厳密デコードを試み、失敗したらShift-JIS(CP932)として読み直す。
@@ -1028,6 +1050,12 @@ function segmentsToPdfLines(segments) {
     // 名残とみられる(お迎えには傘が必要で、ほぼ全行の同じ位置に「シ ノーソ」
     // 「イシスから 授け」のように入っていた)。折り返した行に限って取り除く。
     if (line.full) line.text = line.text.replace(PDF_LINE_END_SPACE_RE, "");
+    // 段の左端から1文字分ほど右から始まる行は、1文字下げ(段落の始まり)とみなす
+    // (2026-11-25、Mikoto要望。区切りの判定はpdfLineSeparator)。PDFの字下げは空白文字
+    // ではなく文字の位置で表されるため、位置で判定する。中央寄せの見出しなど、
+    // 大きく右にずれた行は含めない。
+    const shift = (line.x0 - left) / line.size;
+    line.indented = shift >= 0.6 && shift <= 1.6;
     if (i === 0) return;
     const pitch = (lines[i - 1].y - line.y) / line.size;
     if (pitch > typicalPitch * 1.6) line.boundary = "para";
@@ -1069,7 +1097,22 @@ function joinPdfLines(lines) {
 }
 
 // 前の行と次の行の間に入れる区切り("":つなぐ / "\n":改行 / "\n\n":段落)を決める。
+// 1文字下げの行(cur.indented)は段落の始まりにする(2026-11-25、Mikoto要望)。ただし、
+// これまでの規則で「文の途中」としてつないでいた行は、前の行が文の終わり(句点など)で
+// 終わっていない限りつないだままにする。検証用PDF9本で確かめたところ、箇条書き・注記の
+// 2行目以降(ぶら下げ字下げ)や、段の左端がずれた囲みの中の行が「1文字下げ」と判定され、
+// 「飲み会を|開催しようとする」のように文の途中で段落が切れていたため。
+// 文の終わりの判定には、閉じかっこ(」』）など)は含めない。「これが「魂」|であり」
+// 「《目星》|を判定」のように、文の途中のかっこ閉じが行末に来ることが多いため。
+const PDF_SENTENCE_END_RE = /[。．！？!?♪]$/;
 function pdfLineSeparator(prev, cur) {
+  const sep = pdfLineSeparatorBase(prev, cur);
+  if (!cur.indented || sep === "\n\n") return sep;
+  if (sep === "" && !PDF_SENTENCE_END_RE.test(prev.text)) return sep;
+  return "\n\n";
+}
+
+function pdfLineSeparatorBase(prev, cur) {
   if (cur.boundary === "para") return "\n\n";
   const prevEnd = prev.text;
   const terminal = PDF_TERMINAL_RE.test(prevEnd);
@@ -1735,6 +1778,7 @@ el.btnSplitCopy.addEventListener("click", () => {
   const chrome = document.getElementById("app-chrome");
   if (!vv || !chrome) return;
   const SETTLE_MS = 250;      // これだけ動きがなければ止まったとみなす
+  const SELECTION_SETTLE_MS = 300; // 範囲選択中は、選択範囲がこれだけ変わらなければ止まったとみなす
   const GRACE_MS = 500;       // 再表示してからこの間は、小さな動きでは隠さない
   const BIG_MOVE_PX = 24;     // 1回のイベントでこれ以上動いたら「新しいスクロール」とみなす
   let settleTimer = null;
@@ -1770,11 +1814,31 @@ el.btnSplitCopy.addEventListener("click", () => {
     prev = snap();
   };
 
-  // 止まったと判断したときの再表示。指が触れている間は出さず、指を離したときにやり直す
+  // 本文で範囲を選択しているか
+  const hasEditorSelection = () => {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+    const r = sel.getRangeAt(0);
+    return el.editorBody.contains(r.startContainer) && el.editorBody.contains(r.endContainer);
+  };
+
+  // 止まったと判断したときの再表示。指が触れている間は出さず、指を離したときにやり直す。
+  // ただし本文で範囲を選択しているときは、指が触れていても出す(2026-11-25、Mikoto報告・
+  // 選択: 範囲を選択するとリボンが消え、出すために少しスクロールしなければならない)。
+  // 範囲選択でキーボード上部のバーが切り替わると見えている領域の高さが変わって隠れるが、
+  // 長押し・つまみのドラッグはiOSが引き取るため、指を離したこと(touchend)がページに
+  // 届かず、触れたままと判断して出せなくなっていたと判断した(推測。実機では未確認)。
+  // 選択中は、選択範囲が SELECTION_SETTLE_MS 変わらなければ止まったとみなす。
   const settle = () => {
-    if (touching) return;
+    if (touching && !hasEditorSelection()) return;
+    touching = false;
     place();
   };
+  document.addEventListener("selectionchange", () => {
+    if (!chrome.classList.contains("is-scroll-hidden") || !hasEditorSelection()) return;
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(settle, SELECTION_SETTLE_MS);
+  });
 
   const onMove = () => {
     if (isKeyboardShown()) {
@@ -2842,6 +2906,32 @@ function isolateCopyRangeEnd(wrap) {
   return true;
 }
 
+// コピー範囲(.cp-wrap)の前に同じ段落の内容があれば、そこで段落を分ける。改行・空白だけ
+// なら取り除く(2026-11-25、Mikoto報告: コピー範囲の前に1行空行が入る)。段落の途中の行から
+// 範囲を作ると、前の行と範囲の間の<br>が残り、見た目だけブロックの範囲の手前で空行として
+// 表示されていた。isolateCopyRangeEndと対にして「コピー範囲は常に段落の先頭から始まる」
+// ことにし、前に文章がある場合だけ段落の区切り(空行ではない)を入れる。
+function isolateCopyRangeStart(wrap) {
+  const block = wrap.parentNode;
+  if (!block || block.parentNode !== el.editorBody) return false;
+  const before = [];
+  for (let n = wrap.previousSibling; n; n = n.previousSibling) before.unshift(n);
+  if (before.length === 0) return false;
+  const meaningful = (n) => !(n.nodeType === 3 && n.data.trim() === "") && n.nodeName !== "BR";
+  if (!before.some(meaningful)) {
+    before.forEach((n) => n.remove());
+    return true;
+  }
+  const p = document.createElement(block.tagName === "DIV" ? "div" : "p");
+  p.style.marginLeft = block.style.marginLeft;
+  before.forEach((n) => p.appendChild(n));
+  // 範囲の手前の行を終える<br>は、段落の区切りが代わりになるので取り除く
+  while (p.lastChild && !meaningful(p.lastChild)) p.lastChild.remove();
+  block.parentNode.insertBefore(p, block);
+  p.querySelectorAll(".cp-wrap").forEach((w) => { if (w.dataset.cpid) syncCopyWrapChain(w.dataset.cpid); });
+  return true;
+}
+
 // 本文中のすべてのコピー範囲の構造を整える。変更があった場合は、カーソル位置を保つ。
 function repairCopyRanges() {
   const wraps = Array.from(el.editorBody.querySelectorAll(".cp-wrap"));
@@ -2859,6 +2949,7 @@ function repairCopyRanges() {
     if (repairCopyWrapInside(w)) changed = true;
   });
   wraps.forEach((w) => { if (w.isConnected && isolateCopyRangeEnd(w)) changed = true; });
+  wraps.forEach((w) => { if (w.isConnected && isolateCopyRangeStart(w)) changed = true; });
   if (!changed) return false;
   cpIds.forEach((id) => syncCopyWrapChain(id));
   el.editorBody.querySelectorAll(".cp-target").forEach(ensureCopyTargetHeight);
@@ -3732,6 +3823,16 @@ function copyRangeText(spans) {
   return Array.from(spans).map(copyTargetText).filter((t) => t.trim() !== "")
     .join(COPY_BUTTON_LINE_SEPARATOR).replace(/\s+$/, "");
 }
+
+// 編集画面のコピーボタンを押しても、本文のカーソル・フォーカスを動かさない(2026-11-25、
+// Mikoto報告: 編集画面でコピーボタンを押すと、カーソルの位置までスクロールしてしまう
+// ときがある)。ボタンは本文(contenteditable)の中にあるため、押すと本文にフォーカスが
+// 戻り、以前のカーソル位置が画面に入るようブラウザがスクロールしていたと判断した
+// (推測。iPhone実機では未確認)。リボンのボタンと同じく、mousedownの既定動作を止める
+// (touchstartは止めない。範囲選択・スクロールに影響するため)。
+el.editorBody.addEventListener("mousedown", (e) => {
+  if (e.target.closest && e.target.closest(".cp-btn")) e.preventDefault();
+});
 
 // コピペボタンのクリックはエディタ・プレビューどちらでも動作させる(委譲リスナー)。
 // 複数段落にまたがる範囲は、同じcpidを持つ.cp-targetが複数あるため、すべて連結する。
